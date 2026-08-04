@@ -1,0 +1,374 @@
+# US-112267 — Detailed Analysis
+**Title:** TAR Billing Files — Disbursements Tab — Foundation & ELD Simple Layout
+**Module:** Tax Amount Reports → Tax/TaxAmountReports/TaxAmtDisbursement
+**API Path:** Classic TAX API remoting (`TAXClassicAPI`)
+**Date:** 2026-08-03
+
+---
+
+## 1. Overview
+
+Adds a **Billing File** export to the TAR Disbursements tab in LeretanetCore. The feature is gated by `LDBillingFilesInd = 'Y'` in `LASCommon.dbo.lac_CustomerProfile`. When eligible, the user can click a **Billing File** button to download a plain-text fixed-width `.txt` file containing one row per reported item in the selected TAR job (LoanId, TaxId, AmountToPay, NextELDDate). The four in-scope customers are `1085`, `1090`, `1096`, and `2132`.
+
+The export follows the Classic TAX API remoting path (same as `GetExportPayItems`) — `RequestHelper.PostData` → `TAXClassicAPI` → BLL/DAL dispatcher.
+
+---
+
+## 2. Affected Components
+
+### SQL
+| File | Change |
+|---|---|
+| `SQL/LASCommon/dbo/Stored Procedures/usp_sel_LDBillingFilesInd.sql` | **New** — reads `LDBillingFilesInd` from `lac_CustomerProfile` by `@CustId` |
+| `SQL/db_TaxAmtReports/dbo/Stored Procedures/usp_cta_GetTARBillingFile_sel.sql` | **New** — returns billing file rows for a TAR run |
+
+### LERETANet (Classic TAX API)
+| File | Change |
+|---|---|
+| `LERETANet/MiddleTier/LATFnetTax/DataAccess/ReportsViewedDAL.cs` | **New method** `GetTARBillingFile` |
+| `LERETANet/MiddleTier/LATFnetTax/BusinessLogic/Tax/ReportsViewedBLL.cs` | **New method** `GetTARBillingFile` |
+| `LERETANet/RemotingHosts/RemoteHostServiceTax/Host/Tax.cs` | **New case** `gettarbillingfile` in `TAXAMOUNTREPORTS` dispatcher |
+
+### LeretanetCore Web
+| File | Change |
+|---|---|
+| `LeretanetCore/LeretanetCore.Web/Services/Interfaces/Tax/TaxAmountReports/ITaxAmtDisbursementService.cs` | **New method** `GetTARBillingFileAsync` |
+| `LeretanetCore/LeretanetCore.Web/Services/Tax/TaxAmountReports/TaxAmtDisbursementService.cs` | **New method** `GetTARBillingFileAsync` |
+| `LeretanetCore/LeretanetCore.Web/Models/Tax/TaxAmountReports/TaxAmountReportsViewModel.cs` | **New property** `ShowBillingFileButton` |
+| `LeretanetCore/LeretanetCore.Web/Areas/Tax/Controllers/TaxAmountReportsController.cs` | **Modified** — populate `ShowBillingFileButton` on page load; **new action** `ExportBillingFile` |
+| `LeretanetCore/LeretanetCore.Web/Areas/Tax/Views/TaxAmountReports/TaxAmtDisbursement.cshtml` | **Modified** — conditionally render Billing File button |
+| `LeretanetCore/LeretanetCore.Web/wwwroot/assets/js/page/Tax/TaxAmountReports/TaxAmtDisbursement.js` | **Modified** — click handler for Billing File button |
+| `LeretanetCore/LeretanetCore.Web/Utility/AppConstants.cs` | **Modified** — new route constant if required |
+
+---
+
+## 3. Database Changes
+
+### LASCommon — New Stored Procedure
+
+**`usp_sel_LDBillingFilesInd`**
+- **Purpose:** Read `LDBillingFilesInd` for a given customer at runtime (gate check)
+- **Parameters:** `@CustId VARCHAR(5)`
+- **Returns:** Single row — `LDBillingFilesInd VARCHAR(1)`
+- **Table:** `LASCommon.dbo.lac_CustomerProfile WITH (NOLOCK)`
+- **Key column:** `CUST_ID`
+- **Pattern:** Identical to existing `GetIncomingClientPaymentInd` in the same database
+
+```sql
+CREATE OR ALTER PROCEDURE [dbo].[usp_sel_LDBillingFilesInd]
+    @CustId VARCHAR(5)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SELECT LDBillingFilesInd
+    FROM [LASCommon].[dbo].[lac_CustomerProfile] WITH (NOLOCK)
+    WHERE CUST_ID = @CustId;
+END
+```
+
+---
+
+### db_TaxAmtReports — New Stored Procedure
+
+**`usp_cta_GetTARBillingFile_sel`**
+- **Purpose:** Return all billing file rows for a given TAR run
+- **Parameters:** `@CustId VARCHAR(5)`, `@RunName VARCHAR(8)`, `@RunDate DATETIME`
+- **Returns:** One row per item — `LoanId`, `TaxId`, `AmountToPay`, `NextELDDate`
+- **Table:** `db_TaxAmtReports.dbo.tbl_cta_ReportedItems WITH (NOLOCK)`
+- **Amount logic:** `CASE InstallmentInd WHEN '1' THEN FirstInstallAmt WHEN '2' THEN SecondInstallAmt WHEN '3' THEN ThirdInstallAmt WHEN '4' THEN FourthInstallAmt ELSE FirstInstallAmt END`
+- **Filter:** `DROPPED IS NULL OR DROPPED <> 'Y'`
+- **Scope (Q1 pending):** All items OR Pay items only — awaiting confirmation
+
+```sql
+CREATE OR ALTER PROCEDURE [dbo].[usp_cta_GetTARBillingFile_sel]
+    @CustId   VARCHAR(5),
+    @RunName  VARCHAR(8),
+    @RunDate  DATETIME
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SELECT
+        LoanId,
+        TaxId,
+        CASE InstallmentInd
+            WHEN '1' THEN FirstInstallAmt
+            WHEN '2' THEN SecondInstallAmt
+            WHEN '3' THEN ThirdInstallAmt
+            WHEN '4' THEN FourthInstallAmt
+            ELSE FirstInstallAmt
+        END AS AmountToPay,
+        NextELDDate
+    FROM dbo.tbl_cta_ReportedItems WITH (NOLOCK)
+    WHERE CustId    = @CustId
+      AND CTARunName = @RunName
+      AND CAST(CTARunDate AS DATE) = CAST(@RunDate AS DATE)
+      AND (DROPPED IS NULL OR DROPPED <> 'Y')
+    ORDER BY LoanId;
+END
+```
+
+---
+
+## 4. Repository Changes
+
+### LERETANet — `ReportsViewedDAL.cs`
+
+**New method:**
+```csharp
+public DataSet GetTARBillingFile(string custId, string runName, string runDate)
+```
+- Calls SP `usp_cta_GetTARBillingFile_sel` on `db_TaxAmtReports`
+- Connection string: `ConnectionStringEscrowTracking`
+- Parameters: `@CustId`, `@RunName`, `@RunDate`
+- Returns: `DataSet` (Table[0] — rows of LoanId, TaxId, AmountToPay, NextELDDate)
+
+---
+
+## 5. Application Service Changes
+
+### LERETANet — `ReportsViewedBLL.cs`
+
+**New method:**
+```csharp
+public DataSet GetTARBillingFile(string custId, string runName, string runDate)
+```
+- Calls `ReportsViewedDAL.GetTARBillingFile(custId, runName, runDate)`
+- No additional business logic — returns DataSet directly
+
+### LERETANet — `Tax.cs` (Remoting Dispatcher)
+
+**New case in `TAXAMOUNTREPORTS` switch block:**
+```csharp
+case "gettarbillingfile":
+    obj = taxrptbll.GetTARBillingFile(args[0], args[1], args[2]);
+    break;
+```
+
+---
+
+## 6. API Controller Changes
+
+N/A — This feature uses the Classic TAX API remoting path. No new TTSAPI or CommonAPI controller endpoint is needed. The web layer calls `TAXClassicAPI` directly via `RequestHelper.PostData`.
+
+---
+
+## 7. Web Layer Changes
+
+### `ITaxAmtDisbursementService.cs` — New interface method
+
+```csharp
+/// <summary>
+/// Gets billing file data for eligible Elevate customers
+/// Calls: TAXAMOUNTREPORTS.gettarbillingfile
+/// </summary>
+Task<TaxAmtBillingFileDataResult> GetTARBillingFileAsync(
+    string custId, string runName, string runDate);
+```
+
+---
+
+### `TaxAmtDisbursementService.cs` — New implementation
+
+```csharp
+public async Task<TaxAmtBillingFileDataResult> GetTARBillingFileAsync(
+    string custId, string runName, string runDate)
+```
+- Calls `TAXClassicAPI` via `_httpRequest.PostData`
+- `ObjectType = "TAXAMOUNTREPORTS"`, `MethodName = "gettarbillingfile"`
+- Args: `[ custId, runName, runDate ]`
+- Returns: deserialized `TaxAmtBillingFileDataResult`
+
+---
+
+### `TaxAmountReportsController.cs` — Two changes
+
+**1. Page load — populate `ShowBillingFileButton`**
+
+In `TaxAmtDisbursement` GET action, after `queryValues` is resolved, call the LASCommon gate check via a new lightweight service call (or reuse existing Common API pattern) to read `LDBillingFilesInd` for `queryValues[0]`. Set `viewModel.ShowBillingFileButton = (result == "Y")`.
+
+**2. New action `ExportBillingFile`**
+
+```csharp
+[HttpPost("Tax/TaxAmtDisbursement/ExportBillingFile")]
+public async Task<IActionResult> ExportBillingFile()
+```
+- Reads `queryValues` from session
+- Calls `_taxAmtDisbursementService.GetTARBillingFileAsync(custId, runName, runDate)`
+- Builds fixed-width `.txt` content line by line:
+  - LoanId: left-justified, 10 chars, space-padded
+  - TaxId: left-justified, 25 chars (pos 11–35), space-padded
+  - Filler: 11 spaces (pos 36–46)
+  - AmountToPay: `(decimal × 100)` as integer, right-justified, 10 chars (pos 47–56)
+  - ELDDate: `NextELDDate.ToString("MMddyy")`, 6 chars (pos 57–62)
+  - Trailing: 18 spaces (pos 63–80)
+- Returns `File(bytes, "text/plain", $"BillingFile-{runName}-{custId}.txt")`
+
+---
+
+### `TaxAmtDisbursement.cshtml` — Conditional button
+
+Add Billing File button, rendered only when `Model.ShowBillingFileButton == true`. Placement: ⏳ **Pending Q4 confirmation from PO/Lead.**
+
+---
+
+### `TaxAmtDisbursement.js` — Click handler
+
+Add click handler for Billing File button, following the same pattern as the existing export links (`lnkExportPayItems`, `lnkExportDoNotPayItems`).
+
+Add URL to `window.taxAmtDisbursementConfig.apiUrls`:
+```js
+exportBillingFile: '@Url.Action("ExportBillingFile", "TaxAmountReports")'
+```
+
+---
+
+## 8. Domain / Contract Changes
+
+### New response model — `TaxAmtBillingFileDataResult`
+
+```csharp
+public class TaxAmtBillingFileDataResult
+{
+    public List<TaxAmtBillingFileRow> Table { get; set; }
+}
+
+public class TaxAmtBillingFileRow
+{
+    public string LoanId       { get; set; }
+    public string TaxId        { get; set; }
+    public decimal AmountToPay { get; set; }
+    public DateTime? NextELDDate { get; set; }
+}
+```
+
+Location: `LeretanetCore.Web/Models/Tax/TaxAmountReports/TaxAmtDisbursementRequestResponseModels.cs`
+
+---
+
+## 9. DI Registration Changes
+
+N/A — No new services or repositories are introduced in LeretanetCore. `TaxAmtDisbursementService` and its interface already registered. The new method is added to the existing registered service.
+
+The LASCommon gate check will use the existing `CommonService` / `UserRepository` pattern or a new lightweight call via `RequestHelper` to `CommonAPI` — to be determined based on Q4 resolution and whether `LDBillingFilesInd` needs to be added to the existing user profile flow.
+
+---
+
+## 10. Validation Rules
+
+- If session `queryValues` is null or expired → return error response (same as existing export actions).
+- If `GetTARBillingFileAsync` returns no rows → return empty file (0 records, valid `.txt` download).
+- `ShowBillingFileButton` defaults to `false` if the gate check SP returns null, empty, or any value other than `'Y'`.
+
+---
+
+## 11. Error Handling
+
+- All errors in `ExportBillingFile` action wrapped in `try/catch` → log via `_logSvc.LogException` → return `BadRequest(ex.Message)` (same pattern as `ExportPayItems`).
+- Gate check failure (SP error) → `ShowBillingFileButton = false` (fail safe — hide button rather than error the page).
+- `AmountToPay` null or zero → write `0` to file, do not skip the row.
+- `NextELDDate` null → write 6 spaces in ELD Date position.
+
+---
+
+## 12. Configuration Changes
+
+No new `appsettings.json` keys required. The Classic TAX API base URL is already configured under `TAXClassicAPI`.
+
+---
+
+## 13. SQL Script Delivery
+
+Scripts to be placed under `Documents/LeretanetCore/Scripts/112267/`:
+
+| File | Database | Description |
+|---|---|---|
+| `01_LASCommon_SP_usp_sel_LDBillingFilesInd.sql` | `LASCommon` | New SP — reads `LDBillingFilesInd` by `CustId` |
+| `02_db_TaxAmtReports_SP_usp_cta_GetTARBillingFile_sel.sql` | `db_TaxAmtReports` | New SP — returns billing file rows for a TAR run |
+
+---
+
+## 14. Edge Cases
+
+| Case | Handling |
+|---|---|
+| Customer has no rows in `tbl_cta_ReportedItems` for the run | Empty file downloaded (0 rows, valid `.txt`) |
+| `NextELDDate` is NULL | 6 spaces written in ELD date position |
+| `AmountToPay` is NULL or 0 | `0` written right-justified in amount position |
+| `LoanId` exceeds 10 chars | Truncated to 10 chars (left) |
+| `TaxId` exceeds 25 chars | Truncated to 25 chars (left) |
+| `LDBillingFilesInd` is NULL, space, or any value other than `'Y'` | Button hidden |
+| Session expired before export click | Error returned, consistent with existing export behaviour |
+| `DROPPED = 'Y'` rows | Excluded from the file |
+
+---
+
+## 15. Assumptions
+
+| # | Assumption |
+|---|---|
+| A1 | **Scope of rows** — All items in the TAR run are included (based on AC4 "no items are omitted"). ⏳ Pending Q1 confirmation. |
+| A2 | **Amount format** — `AmountToPay` from DB is `decimal(11,2)` dollars; multiplied by 100 and written as right-justified integer (no decimal) to match sample files. ⏳ Pending Q2 confirmation. |
+| A3 | **Tax ID** — `TaxId` (formatted) column used, matching sample files for all four customers. ⏳ Pending Q3 confirmation. |
+| A4 | **DROPPED filter** — Standard `DROPPED IS NULL OR DROPPED <> 'Y'` filter applied. |
+| A5 | **LASCommon gate check** — Called once during page load and result stored in ViewModel; not re-checked on export click. |
+
+---
+
+## 16. Dependencies
+
+| Dependency | Detail |
+|---|---|
+| `LDBillingFilesInd = 'Y'` test data | Must be set in DEV for customers `1085`, `1090`, `1096`, `2132` before testing. ⏳ Pending Q5 — team to confirm who sets this. |
+| LERETANet Classic TAX API deployment | `ReportsViewedDAL`, `ReportsViewedBLL`, and `Tax.cs` dispatcher changes must be deployed to the TAX remoting host before the LeretanetCore web changes are testable. |
+| SQL scripts must be deployed first | Both new SPs must exist in DEV before any code changes can be tested end-to-end. |
+
+---
+
+## 17. Test Scenarios
+
+| # | Scenario | Expected Result |
+|---|---|---|
+| T1 | Log in as customer `1085` (eligible), open Disbursements tab | **Billing File** button is visible |
+| T2 | Log in as a non-eligible customer (`LDBillingFilesInd <> 'Y'`), open Disbursements tab | **Billing File** button is hidden |
+| T3 | Eligible customer clicks Billing File button | Browser downloads `BillingFile-{RunName}-{CustId}.txt` |
+| T4 | Downloaded file — verify row count | One row per reported item in the TAR run (no omissions) |
+| T5 | Downloaded file — verify LoanId (pos 1–10) | Left-justified, space-padded to 10 chars |
+| T6 | Downloaded file — verify TaxId (pos 11–35) | Left-justified, space-padded to 25 chars |
+| T7 | Downloaded file — verify Amount (pos 47–56) | Right-justified integer cents, 10 chars |
+| T8 | Downloaded file — verify ELD Date (pos 57–62) | `MMDDYY` format, 6 chars |
+| T9 | Downloaded file — verify line length | Every line is exactly 80 characters |
+| T10 | TAR run with a `DROPPED = 'Y'` row | Dropped row not included in file |
+| T11 | TAR run item with NULL `NextELDDate` | 6 spaces in ELD date position, row still included |
+| T12 | Session expired before export click | Error handled gracefully, no crash |
+| T13 | Compare output against provided sample files (`BillingFile_1085_48214.txt` etc.) | Output matches sample files exactly |
+
+---
+
+## 18. Open Questions
+
+```
+Q1. Which items are included in the billing file?
+    Context : AC4 states "no items are omitted" but DoNotPayInd filter is used in other exports.
+    Impact  : Determines WHERE clause in usp_cta_GetTARBillingFile_sel — all rows vs filtered.
+    Status  : ⏳ Pending PO/Lead confirmation
+
+Q2. Amount format — confirm multiply by 100 for integer cents?
+    Context : Sample files show amounts like 387743 = $3,877.43. DB stores as decimal(11,2).
+    Impact  : Determines amount formatting logic in ExportBillingFile action.
+    Status  : ⏳ Pending PO/Lead confirmation
+
+Q3. Which Tax ID column — formatted TaxId or UnformattedTaxId?
+    Context : Sample files for customer 1090 show formatted values (e.g. 11.029.20.32.0042).
+    Impact  : Determines which column is selected in usp_cta_GetTARBillingFile_sel.
+    Status  : ⏳ Pending PO/Lead confirmation
+
+Q4. Where on the Disbursements tab should the Billing File button be placed?
+    Context : Page has existing export links section. No mockup provided.
+    Impact  : Determines Razor view placement of the new button.
+    Status  : ⏳ Pending PO/Lead confirmation
+
+Q5. Who sets LDBillingFilesInd = 'Y' for test customers in DEV?
+    Context : No rows currently have this flag set in scasql30d.lereta.net\LNTdevstg LASCommon.
+    Impact  : Testing of gate check (button visibility) is blocked until data is set.
+    Status  : ⏳ Pending PO/Lead confirmation
+```

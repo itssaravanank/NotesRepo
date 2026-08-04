@@ -1,0 +1,34 @@
+Select Top 10 LDBillingFilesInd, * from LASCommon.dbo.lac_CustomerProfile
+Where LDBillingFilesInd = 'Y'
+
+Select Top 100 * From db_TaxAmtReports.dbo.tbl_cta_ReportedItems
+
+Select Top 10 LoanId, TaxId, UnformattedTaxId, NextELDDate, * from db_TaxAmtReports.dbo.tbl_cta_ReportedItems
+
+
+
+
+BEGIN
+  DECLARE  @CustId   VARCHAR(5) = '81929'
+  DECLARE  @RunName  VARCHAR(8) = 'IN251139'
+  DECLARE  @RunDate  DATETIME   = '2026-04-30'
+     
+    SET NOCOUNT ON;
+    SELECT
+        LoanId,
+        TaxId,
+        CASE InstallmentInd
+            WHEN '1' THEN FirstInstallAmt
+            WHEN '2' THEN SecondInstallAmt
+            WHEN '3' THEN ThirdInstallAmt
+            WHEN '4' THEN FourthInstallAmt
+            ELSE FirstInstallAmt
+        END AS AmountToPay,
+        NextELDDate
+    FROM dbo.tbl_cta_ReportedItems WITH (NOLOCK)
+    WHERE CustId    = @CustId
+      AND CTARunName = @RunName
+      AND CAST(CTARunDate AS DATE) = CAST(@RunDate AS DATE)
+      AND (DROPPED IS NULL OR DROPPED <> 'Y')
+    ORDER BY LoanId;
+END
