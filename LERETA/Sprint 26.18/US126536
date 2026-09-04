@@ -1,0 +1,374 @@
+US-126536 - 6d [TAR] Billing Files - Disbursements Tab - vBillingFiles Group (Customers 1061, 1103, 2130, 2162, 2200)
+
+Description
+
+Synopsis:
+Elevate customers require payment billing files to update their own systems and LNET system should generate billing files that include all items reported under a TAR job. The system should ensure the file structure aligns with each clients' specifications.
+
+As a loan servicing user on the TAR Disbursements tab, I want to export a billing file for customers 1061, 1103, 2130, 2162, and 2200, so that each customer receives a fixed-width .txt file in the same ~200-character format driven by the vBillingFiles view.
+
+Background
+These five customers all query from the vBillingFiles view (in Elevate TAXProd db) and produce the same fixed-width layout as Story C's Pattern 3. The view pre-computes the complex columns (SequenceNo from RType, Total Number of Installments from AllowablePaymentOption, StateCodeText from
+FIPSXref, AgencyNumber from Jurisdiction) so the per-customer SPs are simpler than Pattern 3. The story's effort depends entirely on the spike's view decision:
+
+. If vBillingFiles ports directly to LERETA: create the view once, write five thin SPs
+. If tables require remapping: reproduce the view's join logic in each SP
+
+Customers 1061 and 2130 share an identical query. Customers 2162 and 2200 share the same query with a minor difference in TaxBillNo null handling.
+
+In Scope:
+
+1. Read the customer profile to determine the clients who will receive this new report.
+2. The report should be made available on the TAR disbursements tab [LNET].
+3. Creation of billing file layouts for ~5 identified clients listed above. See attached
+4. Ensuring all billing file exports match the required layout for each client. See attached
+5. Export logic should include all items reported under the TAR job.
+
+Out of Scope
+
+1. Any customer not in this story's list
+
+
+Acceptance Criteria
+
+. AC1 - Existing ACs Inherited All ACs from Story A (profile gate, button visibility, all items included, .txt format) apply to all five customers in this story.
+. AC2 - vBillingFiles View Available in LERETA Given the spike confirmed the view decision, When Story D begins, Then either dbo.vBillingFiles exists in the LERETA database or a LERETA-equivalent view (dbo.vBillingFiles_LERETA) has been created and validated.
+. AC3 - Fixed-Width Layout Matches Pattern 3 - Given any of the five customers exports a billing file, Then the row structure matches the ~200-character fixed-width format from Story C (installment slots, TaxID padded to 50, ReferenceNumber, ServiceBureau, filler fields).
+. AC4- Agency Number Resolution for 1061, 2130, 2162, 2200 Given the customer's payee-display flag is set to use agency numbers, When the billing file is exported, Then each row's taxing authority field contains AgencyNumber (padded to 11 chars) where available, falling back to PayeeCode.
+When the flag is not set, PayeeCode is used directly. NEED TO CONFIRM - Agency Number instead of PayeeCode?
+AC5 - PayeeCode Only for 1103 Given customer 1103 exports a billing file, Then each row's taxing authority field always uses PayeeCode (padded to 11 chars), regardless of the agency number flag. NEED TO CONFIRM - Agency Number instead of PayeeCode?
+
+. AC6 - TaxBillNo Handling Difference for 2200 Given customer 2200 exports a billing file and a row's TaxBillNo is null or empty string, Then the reference number field contains nine zeros. When TaxBillNo is present, it is right-justified in 9 chars, truncated to 9 characters if longer.
+
+
+============================================================================================================================
+
+
+Created 1 todo
+
+Let me analyse the sample files before forming questions.
+
+**Observations from sample files:**
+
+| Customer | First field (taxing authority) | Width | FIPS embedded | Service Bureau | Notes |
+|---|---|---|---|---|---|
+| 1061 | `4802900000` | 10 chars | `48029` (Texas Bexar) | `11` | `\N` null rows appear between data rows |
+| 1103 | `4820100000` | 10 chars | `48201` (Texas Harris) | `11` | |
+| 2130 | `2207104000` | 10 chars | `22071` (Louisiana Orleans) | `11` | Reference field = **property address** e.g. `515-EXPOSITIONBL` |
+| 2162 | `3900300000` | 10 chars | `39003` (Ohio Adams) | `21` | |
+| 2200 | `607300000` | **9 chars** | `06730` (California — non-standard county code) | `21` | AC4/AC5 flag difference |
+
+Critical observations:
+1. **2200's taxing authority field is 9 chars** (`607300000`) vs 10 chars for all others — this is the PayeeCode fallback in action (AC4 says "falling back to PayeeCode" when AgencyNumber unavailable)
+2. **2130's reference field contains a street address**, not a bill number — e.g. `515-EXPOSITIONBL`, `6425-ARGONNEBL`
+3. **`\N` null rows** appear in the 1061 file between agency groups
+4. **`06730`** in 2200 doesn't match standard California FIPS county codes — suggests a different numbering system (IBM or internal)
+
+---
+
+## US-126536 (6d) — Analysis
+
+### What I understand from the story
+
+Five customers share the same ~200-character layout from story 6c ("Pattern 3"), all driven by a **`vBillingFiles` view** from Elevate's TAXProd database. The view pre-computes several complex columns. The entire implementation approach depends on a **spike decision** that must be resolved first.
+
+Customers share queries:
+- **1061 = 2130** — identical query
+- **2162 ≈ 2200** — same query with one difference in null handling for TaxBillNo
+
+---
+
+### Open Questions
+
+---
+
+#### Q1 — Spike Result (AC2 — Critical Blocker)
+
+AC2 is gated on the spike decision: can **`vBillingFiles`** from Elevate's TAXProd database be ported directly to LERETA, or does the join logic need to be reproduced manually?
+
+Has the spike been completed? If yes — what was the outcome? This determines whether we create one shared view or reproduce the logic in each SP.
+
+---
+
+#### Q2 — `vBillingFiles` Source Tables
+
+The story says the view pre-computes four complex columns. To port or reproduce this view, we need to know which Elevate tables it queries. Can you share the view definition (or the spike mapping document which likely includes it)?
+
+Specifically, we need to understand:
+
+- **SequenceNo from RType** — What is "RType" in the LERETA schema? Our current candidate is `[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems].[InstallmentInd]` or `[CSP_TOI_REPT_TYPE]`. Please confirm.
+- **Number of Installments from AllowablePaymentOption** — Our current candidate is `[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems].[CSP_NO_OF_INSTALLS]`. Please confirm.
+- **StateCodeText from FIPSXref** — We have `[LASCommon].[dbo].[lac_CountyInfo].[FIPS]` joined via `AgencyId`. Does this cover the same data as Elevate's FIPSXref, including the California `06730` code seen in the 2200 sample?
+- **AgencyNumber from Jurisdiction** — Our confirmed candidate is `[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems].[VendorAgencyId]` (10 chars). Please confirm.
+
+---
+
+#### Q3 — Payee-Display Flag (AC4 and AC5)
+
+AC4 says the behaviour depends on whether a "payee-display flag" is set per customer. Which table and column in LERETA holds this flag? Is it in `[LASCommon].[dbo].[lac_CustomerProfile]` or `[LASCommon].[dbo].[lac_BillingFileLayout]`?
+
+Also, both AC4 and AC5 are tagged **NEED TO CONFIRM** — please confirm:
+- 1061, 2130, 2162, 2200 → use **AgencyNumber** (`[VendorAgencyId]`, 10 chars) padded to 11, falling back to PayeeCode (`[AgencyId]`, 9 chars) if null
+- 1103 → always use **PayeeCode** (`[AgencyId]`, 9 chars) padded to 11
+
+---
+
+#### Q4 — 2130: Reference Field Contains Property Address
+
+In the 2130 sample file, the reference number field contains a **street address** (e.g., `515-EXPOSITIONBL`, `6425-ARGONNEBL`) rather than a bill number. This is not seen in any other customer's file.
+
+Please confirm: for customer 2130, should the reference field contain the **situs/property address** from `[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems]` situs columns (`SitusStreeNumber`, `SitusStreetName`, etc.), or is the source something different?
+
+---
+
+#### Q5 — `\N` Null Rows in 1061 File
+
+The 1061 sample file contains `\N` rows between agency groups. These appear to be null/empty separator rows from the Elevate system. Should these be **ignored/filtered** in the LNET output, or should they appear as blank lines?
+
+---
+
+#### Q6 — 2200 County Code `06730` (Non-Standard)
+
+In the 2200 sample file, the FIPS-derived field shows `06730` (California). Standard California FIPS county codes are 001–115 — `730` does not match any FIPS county. This suggests it may use a different numbering system (IBM or internal LNET code).
+
+For 2200 specifically: does the state/county code field come from `[LASCommon].[dbo].[lac_CountyInfo].[FIPS]` (standard FIPS), or from the `AgencyId` directly (via `[AgencyId][1,2] + [AgencyId][3,3]`), or from the `IBM` field in `lac_CountyInfo`?
+
+---
+
+### Summary of Questions
+
+| # | Question | Who needs to answer |
+|---|---|---|
+| Q1 | Spike result — can `vBillingFiles` be ported or needs remapping? | Lead |
+| Q2 | Spike mapping doc / view source tables + 4 column derivations | Lead |
+| Q3 | Payee-display flag column; confirm AC4/AC5 rules | Lead / PO |
+| Q4 | 2130 reference field = property address? Which situs columns? | Lead / PO |
+| Q5 | `\N` null rows in 1061 — filter or keep as blank lines? | Lead / PO |
+| Q6 | 2200 county code `06730` — which source? FIPS, AgencyId, or IBM field? | Lead |
+
+
+================================================================================================================
+
+
+
+Read memory
+
+Read memory [](file:///c%3A/Users/gkrishna-c/AppData/Roaming/Code/User/workspaceStorage/ef46f0f433ec1f00ece54378770c23db/GitHub.copilot-chat/memory-tool/memories/YmJkYzM2MTMtNWQyOS00ZWY3LWI4MjgtZDg1ZmU4NjM4YTk3/US-112267-continuation-field-mapping.md)
+
+---
+
+## US-126536 (Story 6d) — Questions for PO & Lead Confirmation
+
+---
+
+### Q1 — Architecture Decision (Depends on Spike — Lead to Confirm)
+
+The story says implementation depends on a **spike** to decide how to pull data from the database.
+
+**Background:** In the existing system (Elevate), there is a database view called `vBillingFiles` that pre-combines data from multiple tables. The spike was supposed to decide whether LERETA should create a similar shared view, or reproduce the logic individually per customer.
+
+**Our recommendation:** Continue the same approach used for Stories 6a, 6b, and 6c — each customer gets its own stored procedure that joins the data directly. No shared view is needed.
+
+**Question for Lead:** Has the spike been completed? If yes, what was the outcome — shared view or individual stored procedures?
+
+> If the spike outcome is **individual SPs**, we can proceed without any impact. If it is **shared view**, we need more time to design the view before implementation.
+
+---
+
+### Q2 — How Many Installments to Include Per Property (Lead to Confirm)
+
+In the database (`db_TaxAmtReports`, table `tbl_cta_ReportedItems`), there are two columns that store the number of installments:
+
+- `CSP_NO_OF_INSTALLS` — the standard/base number of installments
+- `CSP_XAG_NO_OF_INSTALLS` — an agency-level override (more specific)
+
+**Our recommendation:** Use the agency-level override (`CSP_XAG_NO_OF_INSTALLS`) when it has a value, and fall back to the base value (`CSP_NO_OF_INSTALLS`) when the override is empty.
+
+**Question for Lead:** Is this the correct priority — agency override first, then base? Or should only one of these columns be used?
+
+---
+
+### Q3 — State/County Code Field — How Should It Be Derived? (Lead to Confirm)
+
+For most customers, the state/county code in the billing file (e.g., `48029` for Texas Bexar County) lines up with the standard US FIPS code. However, for **Customer 2200** (California), the sample file shows `06730` — and California county code `730` does **not** exist in the standard US FIPS system (California counties only go up to `115`).
+
+The database table `lac_CountyInfo` (in `LASCommon`) has two code columns for each county:
+- `FIPS` — the official US government county code
+- `IBM` — an older IBM mainframe county code, which uses a different numbering system and can produce values like `730` for California
+
+**Our recommendation:** Use the `IBM` code when available, and fall back to the `FIPS` code when IBM is not populated. This explains the `06730` value seen in Customer 2200's sample.
+
+**Question for Lead:** Please confirm — should the state/county field use the `IBM` code from `lac_CountyInfo`, or the `FIPS` code? Or is it derived differently?
+
+> **Verify query for Lead/Dev:** `SELECT state_code, county_code, FIPS, IBM FROM [LASCommon].[dbo].[lac_CountyInfo] WHERE state_code = '06' AND county_code = '730'`
+
+---
+
+### Q4 — Which Agency Code to Show Per Customer (PO & Lead to Confirm)
+
+The story says (AC4/AC5) some customers should show the **AgencyNumber** and others should show the **PayeeCode** in the billing file. Based on the sample files:
+
+- **Customers 1061, 2130, 2162, 2200** → show `VendorAgencyId` (AgencyNumber, up to 10 characters) from `tbl_cta_ReportedItems`
+- **Customer 1103** → show `AgencyId` (PayeeCode, 9 characters) from `tbl_cta_ReportedItems`
+
+Currently, there is no flag in the database that controls which field to use per customer — neither `lac_CustomerProfile` nor `lac_BillingFileLayout` has this setting.
+
+**Our recommendation:** Since each customer already has its own stored procedure, we handle this directly in each SP — no new database column or flag is needed. 1103's SP returns `AgencyId`; the other four return `VendorAgencyId`.
+
+**Questions for PO/Lead:**
+1. Please confirm the mapping above is correct — which customers use AgencyNumber vs PayeeCode?
+2. Is there any customer where the choice might change in the future? (If yes, we should add a configurable flag to the database instead of hardcoding per SP.)
+
+---
+
+### Q5 — Customer 2130: Reference Number Field Contains Property Address (PO & Lead to Confirm)
+
+In the sample file for **Customer 2130**, the reference number field contains a **property street address** (e.g., `515-EXPOSITIONBL`, `6425-ARGONNEBL`). This is different from all other customers where this field contains a bill number.
+
+In the database (`tbl_cta_ReportedItems`), the property address is stored across two columns:
+- `SitusStreeNumber` — the street number (e.g., `515`)
+- `SitusStreetName` — the street name (e.g., `EXPOSITIONBL`)
+
+**Our recommendation:** For Customer 2130, build the reference field by combining: `{StreetNumber}-{StreetName}`, truncated to fit the field width. This matches the pattern `515-EXPOSITIONBL` seen in the sample.
+
+**Questions for PO/Lead:**
+1. Please confirm — for Customer 2130, the reference field should contain the **property address** (not a bill number). Is this correct?
+2. Is the format always `{StreetNumber}-{StreetName}`, or could some rows have no street number (which would produce just `-{StreetName}`)?
+
+---
+
+### Q6 — Blank/Null Rows in Customer 1061 Sample File (PO to Confirm)
+
+The sample file for **Customer 1061** contains `\N` rows between groups of properties. These appear to be separator/null rows from the old system's export format — they are not real data.
+
+**Our recommendation:** These rows do not exist in LERETA's database and will not appear in the LERETA-generated file. The output will be a clean list of property rows, no separators.
+
+**Question for PO:** Is this acceptable — clean sequential rows with no blank line separators between agency groups? Or does the receiving system expect blank lines between groups?
+
+---
+
+### Summary — Who Needs to Answer What
+
+| # | Question | For |
+|---|---|---|
+| Q1 | Spike outcome — shared view or individual SPs? | Lead |
+| Q2 | Which installment count column to use? | Lead |
+| Q3 | State/county code — IBM code or FIPS code? | Lead |
+| Q4 | Which customers use AgencyNumber vs PayeeCode? Any future configurability needed? | PO + Lead |
+| Q5 | Customer 2130 reference = property address? Format correct? | PO + Lead |
+| Q6 | Blank line separators needed in 1061 output? | PO |
+
+
+======================================================================================================================================================================================================================
+
+
+
+## US-126536 (6d) — Open Questions for PO / Lead
+
+**Customers:** 1061, 1103, 2130, 2162, 2200
+
+---
+
+**Q1 — Total Number of Installments** *(Story Background: "AllowablePaymentOption")*
+
+Which column should provide the installment count per agency?
+
+- `[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems].[CSP_NO_OF_INSTALLS]` — base count
+- `[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems].[CSP_XAG_NO_OF_INSTALLS]` — agency-level override
+- `COALESCE(CSP_XAG_NO_OF_INSTALLS, CSP_NO_OF_INSTALLS)` — agency override first, fall back to base
+
+---
+
+**Q2 — County Code for Customer 2200** *(Story Background: "StateCodeText from FIPSXref")*
+
+The sample file shows `06730` for customer 2200. Standard California FIPS county codes don't include `06730`. Should this be derived from:
+
+- `[LASCommon].[dbo].[lac_CountyInfo].[FIPS]` — same as other customers
+- `[LASCommon].[dbo].[lac_CountyInfo].[IBM]` — IBM internal county code
+
+---
+
+**Q3 — First Field: AgencyId or VendorAgencyId?** *(Story AC4)*
+
+For each customer, does the first field in the billing line use AgencyId (9 chars) or VendorAgencyId (10 chars)?
+
+| Customer | Sample | Source? |
+|---|---|---|
+| 1061 | `4802900000` (10 chars) | `AgencyId` or `VendorAgencyId`? |
+| 1103 | `4820100000` (10 chars) | `AgencyId` or `VendorAgencyId`? |
+| 2130 | `2207104000` (10 chars) | `AgencyId` or `VendorAgencyId`? |
+| 2162 | `3900300000` (10 chars) | `AgencyId` or `VendorAgencyId`? |
+| 2200 | `607300000` (9 chars) | `AgencyId` or something else? |
+
+---
+
+**Q4 — Customer 2130: Reference/Address Field** *(Story AC4/AC5)*
+
+The 2130 sample shows a **property address** (e.g., `515-EXPOSITIONBL`, `6425-ARGONNEBL`) in the reference field position. Which DB column(s) does this come from?
+
+- `[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems].[SitusStreeNumber]` + `[SitusStreetName]`?
+- Or another column?
+
+---
+
+**Q5 — Customer 1061: Null/Blank Rows** *(Story AC5)*
+
+When a loan has no installment data, should the output row:
+
+- **Include** the row with zero amounts (`000000000`)?
+- **Exclude** the row entirely?
+
+---
+
+**Q6 — Customers 2162 vs 2200: TaxBillNo Null Handling** *(Story Background: "minor difference in TaxBillNo null handling")*
+
+The story notes 2162 and 2200 use the same query except for how a null `TaxBillNo` is handled. Please confirm:
+
+- When `TaxBillNo` is NULL for **2162** — what should be output?
+- When `TaxBillNo` is NULL for **2200** — what should be output?
+- Which LERETA column is `TaxBillNo`? Is it `[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems].[BillNumber]`?
+
+
+
+
+======================================================================================================================================================================================================================
+
+
+## US-126536 (6d) — Open Questions
+
+After resolving SuppressAgencyNumber from the sample files, only **2 questions remain**:
+
+---
+
+**Q1 — Contract Order Number (MatchID)**
+
+Each billing row has an 8-digit field called **ContractOrderNo**. In Elevate this comes from `MatchID` — a number that uniquely links a loan to a specific tax account.
+
+We cannot find a column called `MatchID` in the LERETA database. **Which LERETA column holds this value?**
+
+---
+
+**Q2 — Total Number of Installments**
+
+Each billing row includes a 1-digit field showing how many installments this tax bill can be paid in.
+
+We found two possible columns in LERETA:
+
+| Option | Table | Column |
+|---|---|---|
+| A | `[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems]` | `CSP_NO_OF_INSTALLS` — base installment count |
+| B | `[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems]` | `CSP_XAG_NO_OF_INSTALLS` — agency-level override |
+
+**Question:** Should we use **Option B** (agency override) when it has a value, falling back to **Option A** (base count) when it is empty? Or should we always use just one of them?
+
+---
+
+### Already Resolved (no need to ask)
+
+| Item | Answer |
+|---|---|
+| First field — 1061, 1103, 2130, 2162 | `VendorAgencyId` (Payee Code) ✅ |
+| First field — 2200 | `AgencyId` (Agency Number) ✅ |
+| Contract Reference (2162/2200 difference) | Confirmed from Elevate query ✅ |
+| 2130 address field | `TaxId` column value ✅ |
+| Sequence number | `LienSeq` ✅ |

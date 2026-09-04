@@ -1,0 +1,326 @@
+US-126537 - 6e [TAR] Billing Files - Disbursements Tab - Special-Case Layouts (Customers 1063, 1114, 2141, 2259)
+
+Description
+
+Synopsis:
+Elevate customers require payment billing files to update their own systems and LNET system should generate billing files that include all items reported under a TAR job. The system should ensure the file structure aligns with each clients' specifications.
+
+As a loan servicing user on the TAR Disbursements tab, I want to export a billing file for customers 1063, 1114, 2141, and 2259, so that each receives a .txt file in their unique required layout containing all reported TAR job items.
+
+Background
+These four customers do not fit any of the patterns established in Stories B-D. Each requires its own distinct approach:
+
+. 1063 uses a CTE and CONCAT to produce a compact 60-character row - the simplest layout in the entire set but structurally different from all others.
+. 1114 sources data from yBillingFiles but outputs a completely different column structure: paired installments (1&3 together, 2&4 together) with the TBM ID as the contract field.
+. 2141 produces the same output structure as 1114 but uses raw joins with MatchID instead of TBMID - requires its own SP rather than reusing yBillingFiles.
+. 2259 requires two separate file sections: Query 1 produces a blank-installment header row (all installment fields are spaces), and Query 2 produces the standard Pattern 4 fixed-width rows. This is the only customer that requires a multi-section .txt file.
+
+In Scope:
+
+1. Read the customer profile to determine the clients who will receive this new report.
+2. The report should be made available on the TAR disbursements tab [LNET].
+3. Creation of billing file layouts for ~5 identified clients listed above. See attached
+4. Ensuring all billing file exports match the required layout for each client. See attached
+5. Export logic should include all items reported under the TAR job.
+
+Out of Scope
+1. Any customer not in this story's list
+2. Changing the meaning or content of 2259's two-section structure - if the business intent of Section 1 is unclear, escalate before implementing
+
+
+Acceptance Criteria
+
+. AC1 - Existing ACs Inherited All ACs from Story A (profile gate, button visibility, all items included, .txt format) apply to all four customers in this story.
+. AC2- Compact Concatenated Layout for 1063 Given customer 1063 exports a billing file, Then each row is exactly 60 characters: loan number right-padded with leading zeros to 16 chars, amount right-padded with leading zeros to 10 chars (decimal removed), due date formatted as MMddyy (6
+chars), tax ID left-padded with spaces to 28 chars. No delimiter between fields.
+. AC3 - Paired Installment Layout for 1114 Given customer 1114 exports a billing file, Then each row contains: payee/agency code, blank agency type, blank customer number, loan number, TBM ID as contract number, blank contract suffix, blank hit code, blank exemption code, state code, blank
+county code, blank lien count, installment 1&3 amount, installment 2&4 amount, total tax amount, blank discounted total, tax ID, blank reference number, blank prior-year flag, blank service bureau, blank installment count, blank pay indicator, blank filler. When AmtToPay is null, amount fields contain
+'0.00'.
+. AC4 - MatchID-Based Layout for 2141 Given customer 2141 exports a billing file, Then the output structure matches AC3 (paired installment format), but the contract number field contains MatchID from Linkage (not TBMID), and total tax amount is only populated when IsCurrentTaxYear = 0 or
+RType sequence is outside 1-4; otherwise null. WHAT DO WE DO WITH MATCHID
+. AC5- Two-Section File for 2259 Given customer 2259 exports a billing file, Then the .txt file contains two sections in order: Section 1 (Query 1 rows): rows with blank customer number (''), blank state/county codes, and all installment fields as spaces - amount and reference number fields use
+spaces, not zeros. Section 2 (Query 2 rows): standard Pattern 4 fixed-width rows (same structure as Story D) with real installment amounts, '1' as total installments, and actual SequenceNo. Both sections are present in every export regardless of data; Section 1 appears before Section 2 with no
+separator line between them.
+
+
+
+---
+
+## US-126537 (Story 6e) — Questions for PO & Lead Confirmation
+
+---
+
+### Q1 — Architecture Decision for Customers 1114 and 2141 (Lead — Critical Blocker)
+
+The story says customers 1114 and 2141 use data from a view called **`yBillingFiles`** and a table called **`Linkage`** (with a column called `MatchID`). Neither `yBillingFiles`, `Linkage`, nor `MatchID` exist anywhere in the LERETA database. These are Elevate-only objects — the same situation we had in Story 6d with `vBillingFiles`.
+
+**Question for Lead:** Can you provide the definition or mapping for:
+1. **`yBillingFiles`** — what LERETA tables does it pull from? What columns does it compute?
+2. **`MatchID` from `Linkage`** — what is the equivalent in LERETA? The story itself flags this as an open question ("WHAT DO WE DO WITH MATCHID"). Based on the sample file for customer 2141, the values in the MatchID position look like formatted Ohio parcel/TaxIDs — so our best guess is that MatchID = `TaxId` from `db_TaxAmtReports.dbo.tbl_cta_ReportedItems`. Please confirm or correct.
+
+> Until these two mappings are confirmed, we cannot start implementation for 1114 or 2141.
+
+---
+
+### Q2 — Contract Number Field for Customer 1114 (Lead to Confirm)
+
+AC3 says the contract number field contains the **TBM ID**. In previous stories (6c), TBM ID mapped to column `CSP_SRV_SYS_PROP_ID` in `db_TaxAmtReports.dbo.tbl_cta_ReportedItems` — a short 7-character numeric value.
+
+However, the sample file for 1114 shows values like `A79499900101000` and `C81899902104600` in that field position — these are 15 characters and include letters. This does **not** match `CSP_SRV_SYS_PROP_ID`.
+
+**Question for Lead:** What is the correct source column for the "TBM ID / contract number" field in customer 1114? Does it come from a different table via `yBillingFiles`?
+
+---
+
+### Q3 — "Prior Year" Flag for Customer 2141 (Lead to Confirm)
+
+AC4 says the total tax amount is only populated when `IsCurrentTaxYear = 0` (meaning the record is for a **prior tax year**). The column `IsCurrentTaxYear` does not exist in the LERETA database.
+
+The closest matching column in `db_TaxAmtReports.dbo.tbl_cta_ReportedItems` is:
+- **`YearType VARCHAR(1)`** — this is a flag that distinguishes the current tax year from prior years (from source field `PRA_YEAR_TYPE`)
+
+**Our recommendation:** Use `YearType` as the equivalent of `IsCurrentTaxYear = 0` (i.e., when `YearType` indicates "prior year", populate the total; otherwise leave it blank).
+
+**Question for Lead:** Please confirm — which value of `YearType` means "prior year" (e.g., `'P'`, `'0'`, or some other value)? This determines the exact WHERE/CASE condition we write.
+
+---
+
+### Q4 — "RType Outside 1–4" Condition for Customer 2141 (Lead to Confirm)
+
+AC4 says the total tax amount is also populated when `RType` (sequence) is outside the range 1–4. Based on our analysis, `RType` from Elevate maps to column **`CSP_TOI_REPT_TYPE VARCHAR(1)`** in `db_TaxAmtReports.dbo.tbl_cta_ReportedItems`.
+
+**Our recommendation:** The condition would be written as: `CSP_TOI_REPT_TYPE NOT IN ('1','2','3','4')`.
+
+**Question for Lead:** Please confirm this mapping is correct — does `CSP_TOI_REPT_TYPE` contain the RType values referenced in AC4?
+
+---
+
+### Q5 — Null Amount Format for Customers 1114 and 2141 (PO/Lead to Confirm)
+
+AC3 says: *"When AmtToPay is null, amount fields contain '0.00'."*
+
+However, the sample files consistently show `000` (three zeros) for zero amounts — not the string `0.00`. These are different:
+- `0.00` = 4 characters including a decimal point
+- `000` = 3 characters, integer cents format (consistent with all other stories)
+
+**Question for PO/Lead:** When the amount is zero or null, should the output be `0.00` (with decimal) or `000` (integer cents, no decimal)? The sample suggests `000` — please confirm.
+
+---
+
+### Q6 — Customer 2259: What Separates Section 1 Rows from Section 2 Rows? (Lead — Critical Blocker)
+
+AC5 says the file must have two sections in order — Section 1 first, then Section 2. But the story doesn't describe what SQL condition produces Section 1 rows vs Section 2 rows.
+
+From the sample file, we can observe:
+- **Section 1 rows** use agencies `1800500000` (county 005) and `1810500000` (county 105)
+- **Section 2 rows** all use agency `1813700000` (county 137)
+
+This suggests the two sections come from different agencies within the same TAR run. But we need to know the actual query condition — is it a specific set of agency codes, a date range, a tax year condition, or something else?
+
+**Question for Lead:** What SQL condition or filter produces Section 1 rows vs Section 2 rows for customer 2259? Please provide either the Elevate query or a description of the business rule.
+
+---
+
+### Q7 — Customer 2259: Section 1 Has Amounts — Clarification Needed (PO/Lead)
+
+AC5 says Section 1 rows have **all installment fields as spaces** — but the sample file clearly shows `0000050137` and `0000101276` in what appears to be an amount position within Section 1 rows.
+
+**Our interpretation:** Pattern 4's layout likely has **two separate amount areas**:
+1. Individual installment fields (1st, 2nd, 3rd, 4th) — these are **spaces** in Section 1
+2. A separate "total amount to pay" field — this IS populated in Section 1 (shown as `0000050137`)
+
+If this interpretation is correct, Section 1 has a real total amount but blank individual installments — which would be consistent with both AC5 and the sample.
+
+**Question for PO/Lead:** Please confirm this interpretation. Also: can you provide the exact field-by-field layout specification for Pattern 4 (the ~200-character layout used in Section 2 and Story D)? We need the exact column names, widths, and alignment to implement this correctly.
+
+---
+
+### Q8 — Customer 2259: Section 1 Reference Field (PO/Lead to Confirm)
+
+Section 1 rows in the sample show a very long reference value: `039619420004100005` (18 chars) and `53-08-20-100-053.000-008` (24 chars, with dashes). Section 2 rows show `022-100634-00` style (13 chars) in the reference position.
+
+These are structurally very different. What is the **source** of the reference field for Section 1 rows? Is it the TaxId formatted differently, or a field from a separate table?
+
+**Question for PO/Lead:** What column populates the reference field in Section 1 rows for customer 2259?
+
+---
+
+### Q9 — Customer 1063: "Tax ID Left-Padded" — Wording in AC2 (PO to Confirm)
+
+AC2 says the Tax ID is **"left-padded with spaces to 28 chars"**. In standard terminology, "left-padded" means spaces are added on the LEFT side (right-aligned). However, the sample file clearly shows the Tax ID value on the LEFT with trailing spaces on the RIGHT — this is left-aligned (right-padded).
+
+**Question for PO:** Please confirm the correct intent for the Tax ID field:
+- **Left-aligned** (value first, spaces after) — matches the sample file ✅
+- **Right-aligned** (spaces first, value at the end) — matches the AC wording literally
+
+---
+
+### Summary — Who Needs to Answer What
+
+| # | Question | For | Blocks |
+|---|---|---|---|
+| Q1 | `yBillingFiles` and `MatchID`/`Linkage` — provide LERETA mappings | Lead | 1114 and 2141 |
+| Q2 | Contract number source column for 1114 (not CSP_SRV_SYS_PROP_ID?) | Lead | 1114 |
+| Q3 | Which value of `YearType` means "prior year" for 2141's condition? | Lead | 2141 |
+| Q4 | Confirm `CSP_TOI_REPT_TYPE` = RType for 2141's condition | Lead | 2141 |
+| Q5 | Null amount format: `0.00` (string) or `000` (integer cents)? | PO/Lead | 1114 and 2141 |
+| Q6 | What SQL condition separates Section 1 from Section 2 for 2259? | Lead | 2259 |
+| Q7 | Pattern 4 field-by-field layout spec for 2259? | PO/Lead | 2259 |
+| Q8 | Source column for Section 1 reference field in 2259? | PO/Lead | 2259 |
+| Q9 | Tax ID alignment for 1063 — left-aligned or right-aligned? | PO | 1063 |
+
+
+
+
+
+
+======================================================================================================================================================================================================================
+
+Let me look at the 6e sample files first.  
+
+Searched for files matching `**/Documents/References/BillingFile_1063*`, 1 match
+
+Searched for files matching `**/Documents/References/BillingFile_1114*`, 1 match
+
+Searched for files matching `**/Documents/References/BillingFile_2141*`, 1 match
+
+Searched for files matching `**/Documents/References/BillingFile_2259*`, 1 match
+
+Read , lines 1 to 5
+
+Read , lines 1 to 5
+
+Read , lines 1 to 5
+
+Read , lines 1 to 10
+
+Good — all 4 files available. Let me analyze the structures:
+- **1063**: Compact ~47-char data rows padded to fixed length, date `013026` visible (Jan 30 2026)
+- **1114 & 2141**: Start with a 7-digit ID, then AgencyId, then alphanumeric TaxIds, then paired amounts `428655  000  428655`
+- **2259**: Long lines (~180+ chars) with large blank gaps — suggests a multi-slot layout
+
+---
+
+## US-126537 (6e) — Open Questions for PO / Lead
+
+**Customers:** 1063, 1114, 2141, 2259
+
+---
+
+### Q1 — Customer 1063: 60-Character Layout — Field Definitions
+
+*(Points to: Story Background — "1063 uses a CTE and CONCAT to produce a compact 60-character row")*
+
+The story says 1063 uses an Elevate-specific CTE (which does not exist in LERETA). From the sample file:
+
+```
+00001245000174780000111791013026091253970040013
+00001245000235670000195849013026061457410010033
+```
+
+We can identify a date field (`013026` = Jan 30, 2026) and what appears to be two IDs, an amount, and a TaxId. **Please provide the full field list and widths for the 60-character line**, or confirm which LERETA columns (`[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems]`) map to each position.
+
+---
+
+### Q2 — Customers 1114 & 2141: Paired Installment Structure — Confirm
+
+*(Points to: Story Background — "paired installments (1&3 together, 2&4 together)")*
+
+From the sample files, each row shows two amount fields plus a total:
+
+```
+1114: ...428655  000        428655
+2141: ...2471    000          2471
+```
+
+Please confirm the structure for those three values:
+
+| Position | Value | Source |
+|---|---|---|
+| First amount | e.g. `428655` | `FirstInstallAmt + ThirdInstallAmt`? |
+| Second amount | e.g. `000` | `SecondInstallAmt + FourthInstallAmt`? |
+| Third amount | e.g. `428655` | Sum of all four installments? |
+
+---
+
+### Q3 — Customer 1114: `yBillingFiles` — LERETA Equivalent
+
+*(Points to: Story Background — "1114 sources data from yBillingFiles")*
+
+`yBillingFiles` is an Elevate-specific view that **does not exist in LERETA**. We need to replicate its join logic directly in SQL using `[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems]`.
+
+**Question:** What tables and join conditions does `yBillingFiles` use to produce the paired installment output for 1114? Or: can we use the same approach as 6c customer 2195 (direct join on `tbl_cta_ReportedItems` grouped by lien) to pair slots 1&3 and 2&4?
+
+---
+
+### Q4 — Customer 2141: `MatchID` — LERETA Equivalent
+
+*(Points to: Story Background — "2141 uses raw joins with MatchID instead of TBMID")*
+
+`MatchID` is Elevate-specific and **does not exist in LERETA**. The 2141 sample shows a 7-digit number at the start of each row:
+
+```
+2046211      39009000001697521...
+2046212      39009000001697521...
+2046213      39009000001697521...
+```
+
+Multiple rows share the same AgencyId (`39009000001697521`), suggesting `MatchID` identifies an installment-level record.
+
+**Question:** What LERETA column is the equivalent of `MatchID`? Is it:
+- `[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems].[CSP_SRV_SYS_PROP_ID]` (same as TBM ID used in 6c)?
+- `[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems].[LienSeq]`?
+- Another column?
+
+---
+
+### Q5 — Customer 2259: Two-Section File — Architecture Decision
+
+*(Points to: Story Background — "2259 is the only customer that requires a multi-section .txt file")*
+
+2259 requires two separate sections in one `.txt` file:
+- **Section 1:** A "blank-installment header row" (installment amount fields = spaces)
+- **Section 2:** Standard fixed-width data rows (Pattern 4)
+
+The current architecture (single SP + single `LayoutDefinition` JSON → one section) **cannot produce two separate sections**. Which approach should be used?
+
+| Option | Description |
+|---|---|
+| **A** | Two separate SP calls from the controller — first call builds Section 1 rows, second call builds Section 2 rows; controller concatenates both into one `.txt` file |
+| **B** | SP returns all rows with a section-type indicator column; controller routes each row through its own JSON layout (one for Section 1, one for Section 2) |
+
+---
+
+### Q6 — Customer 2259: Section 1 vs Section 2 — What Determines the Split?
+
+*(Points to: Story Background — "Query 1 produces a blank-installment header row")*
+
+What DB condition or business rule identifies a row as a **Section 1 header** vs a **Section 2 data row**?
+
+- Is it based on a column value (e.g., `InstallmentInd = null`, or `YearType`)?
+- Is it one header row per agency group, followed by detail rows?
+- Is it a completely separate query with different filter conditions?
+
+---
+
+### Q7 — Customer 2259: Section 2 Layout — Same as 6d Pattern?
+
+*(Points to: Story Background — "Query 2 produces the standard Pattern 4 fixed-width rows")*
+
+The story says Section 2 = "Pattern 4". Is this the same ~200-character format used in Story 6d (the vBillingFiles group: customers 1061, 1103, 2130, 2162, 2200)?
+
+If yes — Section 2 can reuse the same SP branch logic already established for 6d. **Please confirm.**
+
+---
+
+### Summary of Open Questions
+
+| # | Customer | Question | Status |
+|---|---|---|---|
+| Q1 | 1063 | 60-char field definitions | 🔴 Open |
+| Q2 | 1114 & 2141 | Paired amounts: confirm Inst1+3, Inst2+4, Total | 🔴 Open |
+| Q3 | 1114 | `yBillingFiles` → LERETA JOIN approach | 🔴 Open |
+| Q4 | 2141 | `MatchID` → LERETA equivalent column | 🔴 Open |
+| Q5 | 2259 | Two-section file architecture (Option A or B) | 🔴 Open |
+| Q6 | 2259 | What condition splits Section 1 header vs Section 2 data? | 🔴 Open |
+| Q7 | 2259 | Confirm Section 2 = Pattern 4 = same as 6d | 🔴 Open |

@@ -1,0 +1,619 @@
+US-126531 - 6b [TAR] Billing Files - Disbursements Tab - ELD + Payee Layouts (Customers 1072, 2118, 2215, 2161, 2164)
+
+Description:
+
+Synopsis:
+Elevate customers require payment billing files to update their own systems and LNET system should generate billing files that include all items reported under a TAR job. The system should ensure the file structure aligns with each clients' specifications.
+
+As a loan servicing user on the TAR Disbursements tab, I want to export a billing file for customers 1072, 2118, 2215, 2161, and 2164, so that each customer receives a .txt file in their required layout containing all reported TAR job items.
+
+Background
+These five customers share the same base query as Pattern 1 (Loan Number, Tax ID, Amount to Pay, ELD date) but additionally require payee/agency resolution logic - the file must conditionally output either an AgencyNumber or a PayeeCode depending on a per-customer configuration flag. Customers
+2161 and 2164 further require a Michigan county code prefix in Elevate was derived from the payee code, which in the original DTSX was an 83-branch CASE statement. This story needs to replace that as PayeeCode does not exist in LeretaNet.
+
+In Scope:
+
+1. Read the customer profile to determine the clients who will receive this new report.
+2. The report should be made available on the TAR disbursements tab [LNET].
+3. Creation of billing file layouts for ~5 identified clients listed above. See attached
+4. Ensuring all billing file exports match the required layout for each client. See attached
+5. Export logic should include all items reported under the TAR job.
+
+Out of Scope
+
+1. Any customer not in this story's list
+
+
+Acceptance Criteria
+
+. AC1- Existing ACs Inherited All ACs from Story A (profile gate, button visibility, all items included, .txt format) apply to all five customers in this story.
+. AC2 - Payee Resolution for 1072, 2118, 2215 When the billing file is exported, Then each row's payee field contains the AgencyNumber
+. AC3 - Agency Name Included for 2118 and 2215 Given customers 2118 or 2215 export a billing file, Then each row includes the agency name in addition to the payee code and ELD fields, in the fixed-width position specified for those customers.
+. AC4- Sequence Number Handling for 1072 Given customer 1072 exports a billing file, Then installment sequence number and rows with sequence numbers outside the range 1-4 are excluded. NEED TO CONFIRM THIS REQUIREMENT
+. AC5 - Michigan County Code for 2161 and 2164 Given customers 2161 or 2164 export a billing file, Then each row includes a two-character county prefix (e.g., 01-, 47-). When no matching county is found for an Agency, the row is included with an empty county prefix
+
+
+
+| Elevate                    | LNET                   |
+| ------------------------ | ------------------------ |
+| LDID                     | TAR JobName              |
+| QID                      | Blank                    |
+| TBMID                    | PropertyID               |
+| Loan Number              | Loan ID                  |
+| Loan Purpose Code        | Loan Type                |
+| Borrower Name            | Borrower Name            |
+| State                    | State                    |
+| Property Address         | Property Address         |
+| Payee                    | Agency Name              |
+| Tax ID                   | TaxID                    |
+| Inst.                    | Installment Number       |
+| Tax Year                 | Tax Year                 |
+| Base Amount ($)          | Base                     |
+| Penalties and Fees ($)   | P/I                      |
+| Amount To Pay ($)        | Installment Amount       |
+| Tax Status               | Pay Code                 |
+| Special Condition        | HM Code                  |
+| Decision                 | Client Decision          |
+| Branch No                | Branch Number            |
+| Customer Property Number | Customer Property Number |
+| BillToID                 | CustomerID               |
+| County                   | County                   |
+| Agency Number            | Agency Number            |
+| PayeeCode                | ACM Payee Code           |
+| Sequence No              | Lien Sequence Number     |
+| ELDC                     | ELDC                     |
+| ELDE                     | ELDE                     |
+| PREF YE                  | PREF YE                  |
+| Comments                 | TAR Comments             |
+
+
+
+Here it is in a plain, shareable format:
+
+---
+
+## US-126531 (6b) — Decision Points for PO / Lead Confirmation
+
+The following questions need your input before development begins. For each one, a **recommended option is highlighted** — please confirm or choose an alternative.
+
+---
+
+### Q1 — Customer 2215: What layout should the billing file use?
+
+No sample file was provided for customer 2215.
+
+| Option | Description |
+|---|---|
+| **A — Same as 2118** (recommended if similar) | Use the same format as customer 2118: Agency Number + Agency Name included |
+| **B — Custom layout** | A different layout applies — please provide a sample file |
+
+> **Action needed:** Can you provide a sample billing file for 2215, or confirm it follows the same format as 2118?
+
+---
+
+### Q2 — Agency Number: Which data field should be used?
+
+The billing file needs an "Agency Number" column. There are multiple agency-related fields in the database.
+
+| Option | Description |
+|---|---|
+| **A — Vendor Agency ID** ✅ Recommended | A 10-character code that came from the IBM mainframe system. Matches the codes seen in the sample files (e.g., `5602900000`). |
+| B — Internal Agency ID | A 9-character internal LERETA code. Used internally but does not match sample file values. |
+
+> **Recommendation:** Use **Vendor Agency ID**. The sample files confirm it's the right code.
+> **Action needed:** Please confirm this is the correct field.
+
+---
+
+### Q3 — Agency Name: Which data field should be used?
+
+There are two sources for Agency Name in the database.
+
+| Option | Description |
+|---|---|
+| **A — Name on the billing run record** ✅ Recommended | Directly available, up to 36 characters. No extra database lookup needed. |
+| B — Full agency name record | Up to 100 characters. Requires an additional lookup. More complete, but the billing file only displays 26 characters anyway. |
+
+> **Recommendation:** Option A (36-char name on the billing row) is sufficient since the file only shows 26 characters. Both options produce identical output after truncation.
+> **Action needed:** Confirm either option is acceptable, or advise if the full name source is preferred.
+
+---
+
+### Q4 — Michigan County Code (Customers 2161 & 2164)
+
+The billing file requires a 2-character county code prefix for Michigan records (e.g., `28-`, `01-`). The original system derived this from an IBM mainframe field called "PayeeCode" — that field does not exist in the current system.
+
+| Option | Description |
+|---|---|
+| **A — Derive from existing county table** ✅ Recommended | The database already has a county reference table (`lac_CountyInfo`) that contains the IBM-era county codes. The same pattern is used in other parts of the system today. No new tables needed. |
+| B — Create a new mapping table | Build a new table with all 83 Michigan counties mapped to their 2-character codes. More explicit but requires additional setup. |
+| C — Parse from Tax ID | Extract the county from the Tax ID field. Fragile — Tax ID format varies and this could break. Not recommended. |
+
+> **Recommendation:** Option A. The county table already exists with the right data, and the lookup pattern is already proven in the codebase.
+> **Action needed:** Confirm. We will verify the county codes against a few sample records before implementing.
+
+---
+
+### Q5 — Customer 1072: Should records with an invalid Installment Number be excluded?
+
+The billing file amount is calculated based on the Installment Number (1, 2, 3, or 4). The story's AC4 for customer 1072 is flagged as "NEED TO CONFIRM."
+
+If a record has an Installment Number outside 1–4 (e.g., blank, 0, or 5), the amount cannot be calculated.
+
+| Option | Description |
+|---|---|
+| **A — Exclude those records** ✅ Recommended | Records with an invalid Installment Number are silently dropped from the billing file. No malformed rows. |
+| B — Include with $0 amount | Keep the record but show a $0 amount. Could cause confusion on the client side. |
+| C — No filter | Keep all records. Malformed rows will appear in the file. |
+
+> **Recommendation:** Option A. Dropping unresolvable records is the safest approach.
+> **Action needed:** Please confirm AC4 — should records with Installment Number outside 1–4 be excluded for customer 1072?
+
+---
+
+### Q6 — Amount Format: Space-padded or zero-padded?
+
+The billing file amount field is 10 characters wide. There are two ways to fill the space:
+
+| Option | Example ($1,234.56 → stored as 123456 cents) | Description |
+|---|---|---|
+| **A — Space-padded** ✅ Already implemented | `____123456` (spaces before digits) | Matches the sample files. Already how the system works today. |
+| B — Zero-padded | `0000123456` (zeros before digits) | Would require a code change. |
+
+> **Recommendation:** No change needed. The current implementation already matches the sample files.
+> **Action needed:** Confirm space-padded is correct. No development work required for this item.
+
+---
+
+### Q7 — Database Query: One shared query or separate per customer?
+
+The system currently has one database query that retrieves billing file data. For the new customers in 6b, additional data fields are needed (Agency Number, Agency Name, County Code).
+
+| Option | Description |
+|---|---|
+| **A — Extend the existing query** ✅ Recommended | Add the new fields to the existing query. Customers from 6a (1085, 1090, 1096, 2132) are unaffected — the extra columns are simply ignored for them. One query to maintain. |
+| B — Separate query for 6b customers | Create a new query for the 6b customers. Cleaner separation but duplicates the base logic and adds maintenance overhead. |
+| C — One query per customer | A dedicated query for each of the 5 customers. Maximum isolation but most work to maintain. |
+
+> **Recommendation:** Option A. The billing file renderer already ignores columns it doesn't need, so extending the shared query is clean, safe, and requires the least ongoing maintenance.
+> **Action needed:** Confirm this approach is acceptable.
+
+---
+
+**Summary of actions needed from PO / Lead:**
+
+| # | Question | Decision needed |
+|---|---|---|
+| Q1 | Customer 2215 layout | Provide sample file, or confirm same as 2118 |
+| Q2 | Agency Number field | Confirm Vendor Agency ID (10-char) |
+| Q3 | Agency Name field | Confirm 36-char source is sufficient |
+| Q4 | Michigan county code | Confirm derive from existing county table |
+| Q5 | 1072 Installment filter | Confirm exclude records with InstallmentInd outside 1–4 |
+| Q6 | Amount padding | Confirm space-padded (no change needed) |
+| Q7 | Query approach | Confirm extend existing shared query |
+
+
+
+
+
+
+
+
+## US-126531 (6b) — Confirmation Required: PO / Lead Review
+
+---
+
+### Q1 — Customer 2215: What layout should the billing file use?
+
+Can you provide a sample billing file for Customer 2215, or confirm whether it follows the same format as Customer 2118?
+
+---
+
+### Q2 — Agency Number: Which data field should be used?
+
+Please confirm which field should be mapped to **Agency Number** from `[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems]`:
+
+- **VendorAgencyId** — 10-character vendor/agency code from the IBM mainframe
+- **AgencyId** — 9-character internal LERETA agency identifier
+
+---
+
+### Q3 — Agency Name: Which data field should be used?
+
+Please confirm which field should be mapped to **Agency Name**:
+
+- **`[tbl_cta_ReportedItems].[AgencyName]`** — up to 36 characters, no extra lookup needed
+- **`[tbl_cta_ReportedItemsAgencyInfo].[AgencyName]`** — up to 100 characters, requires an additional database lookup
+
+---
+
+### Q4 — Michigan County Code (Customers 2161 & 2164)
+
+The billing file requires a 2-character county prefix for Michigan records (e.g., `28-`, `01-`). Please confirm the preferred approach:
+
+- **Derive from the existing county reference table** (`lac_CountyInfo`) — no new tables needed; uses an established pattern already in the system
+- **Create a new Michigan county mapping table** — explicit list of all 83 Michigan counties mapped to their 2-character codes
+
+---
+
+### Q4 — Michigan County Code (Customers 2161 & 2164)
+
+The billing file requires a 2-character county prefix for Michigan records (e.g., `28-`, `01-`). The original system derived this from a field called **PayeeCode**, which does not exist in the current database.
+
+We believe the county code can be derived from the existing **`AgencyId`** field on the billing record. Based on how `AgencyId` is used across the system, it appears to be a structured 9-character code:
+
+```
+AgencyId = [State Code (2)] [County Code (3)] [Agency Type (2)] [Sequence (2)]
+Example:    26               055               01                001
+            (Michigan)       (Grand Traverse)
+```
+
+If this structure holds for `[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems]`, the county code can be extracted directly from `AgencyId` and matched against the existing county reference table (`lac_CountyInfo`) — no new tables needed.
+
+Could you confirm:
+
+1. Is `AgencyId` on `[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems]` structured as described above?
+
+2. If yes — can you provide 1 or 2 sample `AgencyId` values for customers 2161 and 2164 so we can verify the county lookup against live data before implementing?
+
+3. If no — can you advise where the 2-character Michigan county prefix (01–83) should come from for these customers?
+
+
+### Q5 — Customer 1072: Installment Number filter (AC4 — flagged "NEED TO CONFIRM")
+
+Records with an Installment Number outside the range 1–4 cannot have an amount calculated. Should these records be:
+
+- **Excluded** from the billing file
+- **Included** with a $0 amount
+
+---
+
+### Q6 — Amount Format: Space-padded or zero-padded?
+
+The amount field is 10 characters wide. The sample files show space-padded values (e.g., `____123456`). Please confirm:
+
+- **Space-padded** — matches the sample files; no changes needed
+- **Zero-padded** — e.g., `0000123456`; requires a code change
+
+---
+
+### Q7 — Database Query: Shared or separate per customer?
+
+Please confirm the preferred approach for the billing data query:
+
+- **Extend the existing shared query** — add the new fields (Agency Number, Agency Name, County Code); existing 6a customers are unaffected
+- **Create a separate query for 6b customers** — cleaner separation but duplicates the base logic
+
+
+
+====================================================================================================================================================================================
+
+
+
+# US-126531 — Detailed Analysis
+**Title:** TAR Billing Files — Disbursements Tab — ELD + Payee Layouts
+**Module:** Tax Amount Reports → Tax/TaxAmountReports/TaxAmtDisbursement
+**API Path:** Classic TAX API remoting (`TAXClassicAPI`)
+**Date:** 2026-08-18
+
+---
+
+## 1. Overview
+
+Continuation of US-112267. Adds billing file support for five Elevate customers: **1072, 2118, 2215, 2161, 2164**. The foundation (US-112267) delivered all shared infrastructure — this story delivers only the customer-specific SQL and DB configuration.
+
+**Deliverables:**
+- 1 modified SP (`usp_cta_GetTARBillingFile_sel`) in `db_TaxAmtReports` — extended with IF/ELSE IF blocks for each 6b customer; ELSE branch preserves all existing 6a logic unchanged
+- 5 new seed rows in `LASCommon.dbo.lac_BillingFileLayout`
+- 1 minor fix to `BillingFileFormatter.cs` (null guard for CENTS transform — required by customer 1072's NULL amount behaviour)
+
+**No changes to:** controller, service, interface, view, JS, gate check SP (`usp_sel_BillingFileLayout`), or the `lac_BillingFileLayout` table schema.
+
+---
+
+## 2. Affected Components
+
+### SQL
+| File | Change |
+|---|---|
+| `SQL/LASCommon/dbo/Stored Procedures/usp_sel_BillingFileLayout.sql` | ✅ No change |
+| `SQL/db_TaxAmtReports/dbo/Stored Procedures/usp_cta_GetTARBillingFile_sel.sql` | **Modified** — 5 new IF/ELSE IF blocks added; ELSE branch (6a logic) unchanged |
+| Seed data script | **New** — 5 INSERT rows into `lac_BillingFileLayout` |
+
+### LeretanetCore Web
+| File | Change |
+|---|---|
+| `LeretanetCore/LeretanetCore.Web/Utility/BillingFileFormatter.cs` | **Minor fix** — null guard in `ApplyTransform` |
+| Everything else | ✅ No change |
+
+---
+
+## 3. Database Changes
+
+### LASCommon — New Seed Rows in `lac_BillingFileLayout`
+
+Five rows are inserted — one per customer. The JSON layouts are defined below.
+
+#### Layout JSON — Customer 1072 (no AgencyName, line length = 96)
+
+```json
+{
+  "lineLength": 96,
+  "fields": [
+    { "source": "LoanId",    "width": 10, "align": "LEFT",   "transform": null     },
+    { "source": "TaxId",     "width": 40, "align": "LEFT",   "transform": null     },
+    { "source": "AmtToPay",  "width": 10, "align": "RIGHT",  "transform": "CENTS"  },
+    { "source": "DueDate",   "width": 6,  "align": "LEFT",   "transform": "MMDDYY" },
+    { "source": null,        "width": 20, "align": "SPACES", "transform": null     },
+    { "source": "PayeeCode", "width": 10, "align": "LEFT",   "transform": null     }
+  ]
+}
+```
+
+#### Layout JSON — Customers 2118, 2161, 2164, 2215 (with AgencyName, line length = 122)
+
+```json
+{
+  "lineLength": 122,
+  "fields": [
+    { "source": "LoanId",     "width": 10, "align": "LEFT",   "transform": null     },
+    { "source": "TaxId",      "width": 40, "align": "LEFT",   "transform": null     },
+    { "source": "AmtToPay",   "width": 10, "align": "RIGHT",  "transform": "CENTS"  },
+    { "source": "DueDate",    "width": 6,  "align": "LEFT",   "transform": "MMDDYY" },
+    { "source": null,         "width": 20, "align": "SPACES", "transform": null     },
+    { "source": "PayeeCode",  "width": 10, "align": "LEFT",   "transform": null     },
+    { "source": "AgencyName", "width": 26, "align": "LEFT",   "transform": null     }
+  ]
+}
+```
+
+> **Note:** The JSON is identical for 2118, 2161, 2164, and 2215. All per-customer differences (county prefix, PayeeCode column selection, AgencyName truncation) are handled inside each customer's SP — the formatter receives pre-resolved column values.
+
+#### Seed INSERT
+
+```sql
+INSERT INTO [LASCommon].[dbo].[lac_BillingFileLayout]
+    (CustId, LayoutCode, LayoutDescription, LayoutDefinition, CreatedDate, CreatedBy)
+VALUES
+    ('1072', 'CUST_1072', 'Customer 1072 — ELD Payee 96-char',  @Layout96,  GETDATE(), 'US-126531'),
+    ('2118', 'CUST_2118', 'Customer 2118 — ELD Payee 122-char', @Layout122, GETDATE(), 'US-126531'),
+    ('2161', 'CUST_2161', 'Customer 2161 — ELD MI Payee 122-char', @Layout122, GETDATE(), 'US-126531'),
+    ('2164', 'CUST_2164', 'Customer 2164 — ELD MI Payee 122-char', @Layout122, GETDATE(), 'US-126531'),
+    ('2215', 'CUST_2215', 'Customer 2215 — ELD Payee 122-char', @Layout122, GETDATE(), 'US-126531');
+```
+
+---
+
+### db_TaxAmtReports — Modified Stored Procedure
+
+`usp_cta_GetTARBillingFile_sel` is extended with `IF/ELSE IF` blocks per customer. Each branch has an independent query plan and only the 2161/2164 branches incur the `lac_CountyInfo` JOIN. The `ELSE` branch preserves all original 6a logic unchanged.
+
+> **Adding a new customer in future:** add a new `ELSE IF @CustId = 'XXXX'` block before the `ELSE`.
+
+```sql
+CREATE OR ALTER PROCEDURE [dbo].[usp_cta_GetTARBillingFile_sel]
+    @CustId  VARCHAR(5),
+    @RunName VARCHAR(8),
+    @RunDate DATETIME
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- All rows; AmtToPay NULL when InstallmentInd outside 1-4; no AgencyName
+    IF @CustId = '1072'
+    BEGIN
+        SELECT
+            ri.LoanId,
+            ri.TaxId,
+            CASE WHEN ri.InstallmentInd IN ('1','2','3','4')
+                 THEN CASE ri.InstallmentInd
+                          WHEN '1' THEN ri.FirstInstallAmt
+                          WHEN '2' THEN ri.SecondInstallAmt
+                          WHEN '3' THEN ri.ThirdInstallAmt
+                          WHEN '4' THEN ri.FourthInstallAmt
+                      END
+                 ELSE NULL
+            END                                                   AS AmtToPay,
+            ri.NextELDDate                                        AS DueDate,
+            COALESCE(NULLIF(ri.AgencyId, ''), ri.VendorAgencyId)  AS PayeeCode
+        FROM [db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems] ri WITH (NOLOCK)
+        WHERE ri.CustId     = @CustId
+          AND ri.CTARunName = @RunName
+          AND CAST(ri.CTARunDate AS DATE) = CAST(@RunDate AS DATE)
+          AND ri.Paid_Items = 'Y'
+          AND (ri.DROPPED IS NULL OR ri.DROPPED <> 'Y')
+        ORDER BY ri.LoanId;
+    END
+
+    -- Standard TaxId; AgencyId fallback PayeeCode; with AgencyName
+    ELSE IF @CustId = '2118'
+    BEGIN
+        SELECT
+            ri.LoanId,
+            ri.TaxId,
+            CASE ri.InstallmentInd
+                WHEN '1' THEN ri.FirstInstallAmt
+                WHEN '2' THEN ri.SecondInstallAmt
+                WHEN '3' THEN ri.ThirdInstallAmt
+                WHEN '4' THEN ri.FourthInstallAmt
+                ELSE ri.FirstInstallAmt
+            END                                                   AS AmtToPay,
+            ri.NextELDDate                                        AS DueDate,
+            COALESCE(NULLIF(ri.AgencyId, ''), ri.VendorAgencyId)  AS PayeeCode,
+            LEFT(ri.AgencyName, 26)                               AS AgencyName
+        FROM [db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems] ri WITH (NOLOCK)
+        WHERE ri.CustId     = @CustId
+          AND ri.CTARunName = @RunName
+          AND CAST(ri.CTARunDate AS DATE) = CAST(@RunDate AS DATE)
+          AND ri.Paid_Items = 'Y'
+          AND (ri.DROPPED IS NULL OR ri.DROPPED <> 'Y')
+        ORDER BY ri.LoanId;
+    END
+
+    -- Michigan county prefix on TaxId (leading zero dropped); VendorAgencyId always as PayeeCode
+    ELSE IF @CustId = '2161'
+    BEGIN
+        SELECT
+            ri.LoanId,
+            LEFT(SUBSTRING(ci.county_code, 2, LEN(ci.county_code)) + ri.TaxId, 40) AS TaxId,
+            CASE ri.InstallmentInd
+                WHEN '1' THEN ri.FirstInstallAmt
+                WHEN '2' THEN ri.SecondInstallAmt
+                WHEN '3' THEN ri.ThirdInstallAmt
+                WHEN '4' THEN ri.FourthInstallAmt
+                ELSE ri.FirstInstallAmt
+            END                                                   AS AmtToPay,
+            ri.NextELDDate                                        AS DueDate,
+            ri.VendorAgencyId                                     AS PayeeCode,
+            LEFT(ri.AgencyName, 26)                               AS AgencyName
+        FROM [db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems] ri WITH (NOLOCK)
+        LEFT JOIN [LASCommon].[dbo].[lac_CountyInfo] ci WITH (NOLOCK)
+            ON ci.state_code = '26'
+            AND ci.FIPS = SUBSTRING(ri.AgencyId, 3, 3)
+        WHERE ri.CustId     = @CustId
+          AND ri.CTARunName = @RunName
+          AND CAST(ri.CTARunDate AS DATE) = CAST(@RunDate AS DATE)
+          AND ri.Paid_Items = 'Y'
+          AND (ri.DROPPED IS NULL OR ri.DROPPED <> 'Y')
+        ORDER BY ri.LoanId;
+    END
+
+    -- Michigan county prefix + strip leading zero from TaxId (see Assumption A2); AgencyId fallback PayeeCode
+    ELSE IF @CustId = '2164'
+    BEGIN
+        SELECT
+            ri.LoanId,
+            LEFT(
+                SUBSTRING(ci.county_code, 2, LEN(ci.county_code))
+                + LTRIM(REPLACE(ri.TaxId, '0', ' ')),  -- leading-zero strip placeholder; confirm with sample TaxId
+                40
+            )                                                     AS TaxId,
+            CASE ri.InstallmentInd
+                WHEN '1' THEN ri.FirstInstallAmt
+                WHEN '2' THEN ri.SecondInstallAmt
+                WHEN '3' THEN ri.ThirdInstallAmt
+                WHEN '4' THEN ri.FourthInstallAmt
+                ELSE ri.FirstInstallAmt
+            END                                                   AS AmtToPay,
+            ri.NextELDDate                                        AS DueDate,
+            COALESCE(NULLIF(ri.AgencyId, ''), ri.VendorAgencyId)  AS PayeeCode,
+            LEFT(ri.AgencyName, 26)                               AS AgencyName
+        FROM [db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems] ri WITH (NOLOCK)
+        LEFT JOIN [LASCommon].[dbo].[lac_CountyInfo] ci WITH (NOLOCK)
+            ON ci.state_code = '26'
+            AND ci.FIPS = SUBSTRING(ri.AgencyId, 3, 3)
+        WHERE ri.CustId     = @CustId
+          AND ri.CTARunName = @RunName
+          AND CAST(ri.CTARunDate AS DATE) = CAST(@RunDate AS DATE)
+          AND ri.Paid_Items = 'Y'
+          AND (ri.DROPPED IS NULL OR ri.DROPPED <> 'Y')
+        ORDER BY ri.LoanId;
+    END
+
+    -- Standard TaxId; VendorAgencyId always as PayeeCode; with AgencyName
+    ELSE IF @CustId = '2215'
+    BEGIN
+        SELECT
+            ri.LoanId,
+            ri.TaxId,
+            CASE ri.InstallmentInd
+                WHEN '1' THEN ri.FirstInstallAmt
+                WHEN '2' THEN ri.SecondInstallAmt
+                WHEN '3' THEN ri.ThirdInstallAmt
+                WHEN '4' THEN ri.FourthInstallAmt
+                ELSE ri.FirstInstallAmt
+            END                                                   AS AmtToPay,
+            ri.NextELDDate                                        AS DueDate,
+            ri.VendorAgencyId                                     AS PayeeCode,
+            LEFT(ri.AgencyName, 26)                               AS AgencyName
+        FROM [db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems] ri WITH (NOLOCK)
+        WHERE ri.CustId     = @CustId
+          AND ri.CTARunName = @RunName
+          AND CAST(ri.CTARunDate AS DATE) = CAST(@RunDate AS DATE)
+          AND ri.Paid_Items = 'Y'
+          AND (ri.DROPPED IS NULL OR ri.DROPPED <> 'Y')
+        ORDER BY ri.LoanId;
+    END
+
+    -- Original 6a logic (customers 1085, 1090, 1096, 2132) — unchanged
+    ELSE
+    BEGIN
+        SELECT
+            LoanId,
+            TaxId,
+            CASE InstallmentInd
+                WHEN '1' THEN FirstInstallAmt
+                WHEN '2' THEN SecondInstallAmt
+                WHEN '3' THEN ThirdInstallAmt
+                WHEN '4' THEN FourthInstallAmt
+                ELSE FirstInstallAmt
+            END AS AmountToPay,
+            NextELDDate
+        FROM [db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems] WITH (NOLOCK)
+        WHERE CustId     = @CustId
+          AND CTARunName = @RunName
+          AND CAST(CTARunDate AS DATE) = CAST(@RunDate AS DATE)
+          AND Paid_Items = 'Y'
+          AND (DROPPED IS NULL OR DROPPED <> 'Y')
+        ORDER BY LoanId;
+    END
+END
+```
+
+---
+
+## 4. BillingFileFormatter.cs — Minor Fix
+
+**File:** `LeretanetCore/LeretanetCore.Web/Utility/BillingFileFormatter.cs`
+
+Customer 1072 returns `NULL` for `AmtToPay` when `InstallmentInd` is outside 1–4. The existing `ApplyTransform` method attempts to parse the value for the `CENTS` transform, which throws on an empty/null input. Add a null guard at the top of `ApplyTransform`:
+
+```csharp
+private static string ApplyTransform(string value, string transform)
+{
+    if (string.IsNullOrEmpty(value)) return value;  // null/empty passes through unchanged
+    // ... existing CENTS, MMDDYY logic unchanged
+}
+```
+
+When `AmtToPay` is null, the formatter will output `value = ""` which after `PadLeft(10)` produces 10 spaces — matching the expected blank amount field.
+
+---
+
+## 5. SP Design
+
+A single SP (`usp_cta_GetTARBillingFile_sel`) serves all customers via `IF/ELSE IF` blocks. The controller calls this same SP for all customers — no change to the calling code.
+
+| Branch | Customer(s) | Behaviour |
+|---|---|---|
+| `IF @CustId = '1072'` | 1072 | NULL amt outside InstallmentInd 1–4; no AgencyName |
+| `ELSE IF @CustId = '2118'` | 2118 | Standard TaxId; AgencyId fallback PayeeCode; AgencyName |
+| `ELSE IF @CustId = '2161'` | 2161 | MI county prefix on TaxId; VendorAgencyId always |
+| `ELSE IF @CustId = '2164'` | 2164 | MI county prefix + stripped TaxId; AgencyId fallback |
+| `ELSE IF @CustId = '2215'` | 2215 | Standard TaxId; VendorAgencyId always; AgencyName |
+| `ELSE` | 1085, 1090, 1096, 2132 | Original 6a logic — unchanged |
+
+---
+
+## 6. Implementation Order
+
+```
+1. BillingFileFormatter.cs — add null guard (unblocks 1072 testing)
+2. SQL — snapshot current usp_cta_GetTARBillingFile_sel body (pre-change rollback)
+3. SQL — modify usp_cta_GetTARBillingFile_sel: add 5 IF/ELSE IF blocks; confirm ELSE branch unchanged
+4. SQL — 5 seed rows in lac_BillingFileLayout
+5. Regression test: 6a customers (1085, 1090, 1096, 2132) still work
+6. End-to-end test: each 6b customer
+```
+
+---
+
+## 7. Open Assumptions
+
+| # | Assumption | Impact if Wrong |
+|---|---|---|
+| A1 | `PayeeCode` (for SuppressAgencyNumber = -1 customers 2161 and 2215, and as fallback for 0 customers) = `VendorAgencyId VARCHAR(10)` from `tbl_cta_ReportedItems` | SP PayeeCode expression changes |
+| A2 | "Strip leading zero from TaxId" for customer 2164 means remove only the first character if it is `'0'` (e.g., `'0123456'` → `'123456'`). SQL expression needs a sample TaxId to confirm. | SP TaxId concatenation expression changes |
+
+
+

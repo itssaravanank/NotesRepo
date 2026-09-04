@@ -1,0 +1,566 @@
+US - 6c [TAR] Billing Files - Disbursements Tab - Fixed-Width Complex Layouts (Customers 1055, 1113, 2145, 2195, 2207)
+
+Description
+
+Synopsis:
+Elevate customers require payment billing files to update their own systems and LNET system should generate billing files that include all items reported under a TAR job. The system should ensure the file structure aligns with each clients' specifications.
+
+As a loan servicing user on the TAR Disbursements tab, I want to export a billing file for customers 1055, 1113, 2145, 2195, and 2207, so that each customer receives a fixed-width .txt file containing full installment detail across up to four installments per TAR job item.
+
+Background
+These five customers require a ~200-character fixed-width layout that includes installment status and amount fields for each of four installment slots, a zero-padded tax ID, a reference number, and a service bureau number. The layout structure is consistent across all five, but each has distinct variations:
+customer 1055 and 2145 apply a payee code transform (digit replacement), 2195 uses the TBM ID as the agency identifier and concatenates the tax ID with payee code, 1113 and 2207 derive state and county from the FIPS code, and 2207 uses PayeeReporting.SequenceNo rather than the RType-derived
+sequence. The installment CASE logic is already defined in the DTSX extracts and is being ported to LERETA schema per the spike mapping document.
+
+In Scope:
+
+1. Read the customer profile to determine the clients who will receive this new report.
+2. The report should be made available on the TAR disbursements tab [LNET].
+3. Creation of billing file layouts for ~5 identified clients listed above. See attached
+4. Ensuring all billing file exports match the required layout for each client. See attached
+5. Export logic should include all items reported under the TAR job.
+
+Out of Scope
+
+1. Any customer not in this story's list
+2. Performance optimization of the NumberOfInstallments correlated subquery (log as tech debt if flagged)
+
+
+Acceptance Criteria
+
+. AC1 - Existing ACs Inherited All ACs from Story A (profile gate, button visibility, all items included, .txt format) apply to all five customers in this story.
+AC2- Four-Installment Fixed-Width Layout Given any of the five customers exports a billing file, Then each row is a fixed-width record containing: installment status (1 char) and amount (9 chars) for each of four installment slots, total tax amount (10 chars), discounted total (10 chars), tax ID
+padded to 50 chars, reference number (9 chars), prior-year flag (1 char), service bureau number (5 chars), number of installments (1 char), current installment (1 char), and filler fields, matching the field widths specified per customer.
+. AC3 - Payee Code Transform for 1055 and 2145 Given customers 1055 or 2145 export a billing file, Then payee codes beginning with 48 and of length 10 have their first two digits replaced with 9, and payee codes of length 10 not starting with 48 are trimmed to the first 7 and last 2 characters,
+and all other payee codes are used as-is.
+NEED TO CONFIRM
+. AC4- FIPS-Derived State and County for 1113 and 2207 Given customers 1113 or 2207 export a billing file, Then each row's state code (2 chars) and county code (3 chars) are derived by splitting the TBM's FIPS code at positions 1-2 and 3-5 respectively.
+AC5 - TBM ID as Agency Identifier for 2195 Given customer 2195 exports a billing file, Then the agency ID field contains the zero-padded TBM ID (9 chars), and the contract number field contains literal 99999999, and the tax ID field contains the stripped tax ID concatenated with the payee code,
+right-padded to 50 chars.
+NEED TO CONFIRM
+. AC6- Installment Amount Populated per Sequence Given a TAR item has a sequence number of 1, 2, 3, or 4, Then the corresponding installment amount slot is populated with the zero-padded amount (no decimal point), and all other installment slots contain zeros. When the amount is null, the
+slot contains zeros.
+NEED TO CONFIRM
+
+
+
+
+
+You're right — the common mapping covers several of these. Let me cross-reference it and remove what's already answered.
+
+From the mapping: **TBMID → PropertyID**, **PayeeCode → ACM Payee Code**, **Sequence No → Lien Sequence Number**.
+
+That resolves parts of AC3, AC5, and the 2207 sequence question. The remaining gaps are fields the mapping doesn't cover. Here's the revised, tighter list:
+
+---
+
+## US-126535 (6c) — Questions for PO / Lead
+
+---
+
+### Missing Artefacts
+
+**The 2207 sample file is empty (0 bytes).** Can you re-upload the correct file?
+
+---
+
+### Common Questions (All 5 Customers)
+
+The common field mapping doesn't include these three fields from AC2. Which DB columns do they map to?
+
+- **Discounted total** (10 chars)
+- **Reference number** (9 chars) — best candidate is `BillNumber VARCHAR(10)`. Correct?
+- **Prior-year flag** (1 char) — best candidate is `YearType VARCHAR(1)`. Correct?
+
+---
+
+### Per Acceptance Criteria
+
+**AC3 — Payee Code Transform (1055 and 2145)**
+
+The mapping shows PayeeCode → ACM Payee Code. Which specific DB column is this — is it `VendorAgencyId` in `tbl_cta_ReportedItems`? Also please confirm the three transform rules (AC3 is tagged **NEED TO CONFIRM**).
+
+**AC4 — FIPS-Derived State and County (1113 and 2207)**
+
+The 1113 sample shows Maryland FIPS codes even though the agencies are Iowa-based — so the FIPS is not coming from the agency identifier. Which column or table provides the per-row FIPS code for 1113 and 2207?
+
+**AC5 — TBM ID and Tax ID for 2195**
+
+The mapping shows TBMID → PropertyID. Which specific DB column holds the PropertyID (our candidate is `OrigAgencyCode`, 9-digit numeric)? Also, AC5 is tagged **NEED TO CONFIRM** — please confirm the contract number literal (`99999999`) and the payee code used in the tax ID concatenation.
+
+**AC6 — Installment Amount Slots**
+
+AC6 is tagged **NEED TO CONFIRM**. Please confirm: when a slot has no amount (null), should it output **zeros**, not blanks?
+
+
+
+
+
+
+
+
+=============================================================================================================================
+
+
+## US-126535 (6c) — Confirmation Required: PO / Lead Review
+
+---
+
+### Missing Artefact
+
+**The 2207 sample billing file is empty.** Can you re-upload the correct file?
+
+---
+
+### Common Questions (All 5 Customers)
+
+**Discounted Total field — which value should be used?**
+
+- **Sum of all four installment amounts** from `[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems]` columns `FirstInstallAmt + SecondInstallAmt + ThirdInstallAmt + FourthInstallAmt` — no extra data needed; the sample files suggest this field equals the total when no discount applies
+- **`[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems].[EftAmt]`** — a dedicated EFT/discount amount stored per row
+
+---
+
+### Per Acceptance Criteria
+
+**AC3 — Payee Code Transform (Customers 1055 and 2145)**
+
+We believe the payee code field is **`[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems].[VendorAgencyId]`** (10-character vendor agency code). Please confirm this is correct, and confirm the three transform rules are finalised (AC3 is tagged **NEED TO CONFIRM**):
+
+- Payee code starts with `48` and is 10 characters → replace the first two digits with `9`
+- Payee code is 10 characters and does **not** start with `48` → keep the first 7 characters and last 2 characters
+- All other payee codes → use as-is
+
+**AC4 — FIPS-Derived State and County (Customers 1113 and 2207)**
+
+We confirmed the FIPS code can be derived from **`[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems].[AgencyId]`** using the existing county reference table **`[LASCommon].[dbo].[lac_CountyInfo].[FIPS]`** — no new tables needed.
+
+Please confirm: is the FIPS code always derived from the **agency on the billing row**, or could it come from a different source (e.g., property address)?
+
+**AC5 — TBM ID and Tax ID for Customer 2195**
+
+We believe the TBM ID (9-char agency identifier for 2195) comes from **`[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems].[CSP_SRV_SYS_PROP_ID]`** (7-digit Service System Property ID, zero-padded to 9 characters). Please confirm, and also confirm (AC5 is tagged **NEED TO CONFIRM**):
+
+- Is the contract number field (**`[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems].[ContractId]`**) always the literal value `99999999` for customer 2195?
+- Which payee code is concatenated to the stripped tax ID (**`[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems].[TaxId]`**) in the tax ID field?
+
+**AC6 — Installment Amount Slots**
+
+AC6 is tagged **NEED TO CONFIRM**. When a billing row has no amount for a slot (e.g., only installment 1 is populated), should the remaining slots in `[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems]` columns `SecondInstallAmt`, `ThirdInstallAmt`, `FourthInstallAmt` output:
+
+- **Zeros** — e.g., `000000000`
+- **Blanks/spaces**
+
+**AC2 — Sequence Number for Customer 2207**
+
+The story mentions 2207 uses a field called `PayeeReporting.SequenceNo` instead of the standard **`[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems].[LienSeq]`**. We could not identify `PayeeReporting` in the database. Can you clarify which table or system this comes from?
+
+---
+
+### Customer-Specific Behaviour
+
+**Customer 2145 — Service Bureau Varies by Row**
+
+In the 2145 sample file, the service bureau code is `10` for most agencies but `20` for one agency type. We believe this is expected — the value comes from **`[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems].[CSP_XCP_SRV_BUREAU]`** per row and naturally varies by agency. Please confirm this is the correct behaviour and no special override logic is needed.
+
+
+
+
+
+=================================================================================================================================================================================================================================================================================================================================
+
+
+
+# US-126535 — Detailed Analysis
+**Title:** TAR Billing Files — Disbursements Tab — ELD Layouts (Extended Fields)
+**Module:** Tax Amount Reports → Tax/TaxAmountReports/TaxAmtDisbursement
+**API Path:** Classic TAX API remoting (`TAXClassicAPI`)
+**Date:** 2026-08-19
+
+---
+
+## 1. Overview
+
+Continuation of US-126531 (6b). Adds billing file support for five more Elevate customers: **1055, 1113, 2145, 2195, 2207**. Line structures are more complex than 6b — each starts with AgencyId or TBM_ID, includes embedded CustId, and uses 9-char zero-padded installment amounts.
+
+**Deliverables:**
+- 1 modified SP (`usp_cta_GetTARBillingFile_sel`) — 4 new IF/ELSE IF blocks confirmed; 2207 blocked pending layout spec
+- 4 new seed rows in `LASCommon.dbo.lac_BillingFileLayout` (2207 TBD)
+- No C# changes
+
+**No changes to:** controller, service, interface, view, JS, gate check SP, or table schema.
+
+---
+
+## 2. Affected Components
+
+### SQL
+| File | Change |
+|---|---|
+| `SQL/LASCommon/dbo/Stored Procedures/usp_sel_BillingFileLayout.sql` | ✅ No change |
+| `SQL/db_TaxAmtReports/dbo/Stored Procedures/usp_cta_GetTARBillingFile_sel.sql` | **Modified** — 4 new IF/ELSE IF blocks; existing branches unchanged |
+| Seed data script | **New** — 4 INSERT rows into `lac_BillingFileLayout` |
+
+### LeretanetCore Web
+| File | Change |
+|---|---|
+| `LeretanetCore/LeretanetCore.Web/Utility/BillingFileFormatter.cs` | ✅ No change |
+| Everything else | ✅ No change |
+
+---
+
+## 3. Cross-Customer Rules
+
+### 3.1 AC3 — PayeeCode Transform (Customers 1055 and 2145)
+
+Applied in the SP using `VendorAgencyId` as source:
+
+```sql
+CASE
+    WHEN LEN(ri.VendorAgencyId) = 10 AND LEFT(ri.VendorAgencyId, 2) = '48'
+        THEN '9' + SUBSTRING(ri.VendorAgencyId, 3, 8)         -- 9 chars: prepend '9', take chars 3-10
+    WHEN LEN(ri.VendorAgencyId) = 10
+        THEN LEFT(ri.VendorAgencyId, 7) + RIGHT(ri.VendorAgencyId, 2) -- 9 chars: first 7 + last 2
+    ELSE ri.VendorAgencyId                                     -- as-is (< 10 chars)
+END AS PayeeCode
+```
+
+**Examples:**
+
+| VendorAgencyId | Rule | Output |
+|---|---|---|
+| `4812345678` (10 chars, starts `48`) | Rule 1 | `912345678` (9 chars) |
+| `1234567890` (10 chars, not `48`) | Rule 2 | `123456790` (9 chars) |
+| `R367626` (7 chars) | Rule 3 | `R367626` (as-is) |
+
+### 3.2 Installment Amount Format (all customers)
+
+```sql
+-- SP returns decimal value; formatter applies CENTS + width=9
+ISNULL(ri.FirstInstallAmt, 0) AS Inst1   -- NULL → 0 → formatter outputs 000000000
+```
+
+The formatter CENTS transform strips the decimal and right-justifies in `width` chars:
+- `1032.29` → `103229` → `000103229` (9 chars) ✓
+- `0.00` → `0` → `000000000` (9 chars) ✓
+
+### 3.3 DiscountedTotal
+
+Hardcoded literal `'0000000000'` (10 zeros) in all 6c SP branches. Matches original DTSX behaviour.
+
+### 3.4 Common WHERE Filter (all 6c branches)
+
+```sql
+WHERE ri.CustId     = @CustId
+  AND ri.CTARunName = @RunName
+  AND CAST(ri.CTARunDate AS DATE) = CAST(@RunDate AS DATE)
+  AND ri.Paid_Items = 'Y'
+  AND (ri.DROPPED IS NULL OR ri.DROPPED <> 'Y')
+ORDER BY ri.LoanId
+```
+
+---
+
+## 4. Database Changes
+
+### LASCommon — Seed Rows in `lac_BillingFileLayout`
+
+> ⚠️ JSON `LayoutDefinition` bodies are **DRAFT** — exact field widths and positions are derived from sample file analysis and must be confirmed against billing specs before deployment.
+
+| CustId | LayoutCode | Notes |
+|---|---|---|
+| `1055` | `CUST_1055` | Layout derived from sample file; positions TBD |
+| `1113` | `CUST_1113` | Layout derived from sample file; positions TBD |
+| `2145` | `CUST_2145` | ServiceBureau field pending resolution (see O4) |
+| `2195` | `CUST_2195` | Most complete; reference fields at line end TBD |
+| `2207` | `CUST_2207` | 🔴 BLOCKED — empty sample file |
+
+---
+
+### db_TaxAmtReports — Modified Stored Procedure
+
+`usp_cta_GetTARBillingFile_sel` extended with 4 new `ELSE IF` blocks before the existing `ELSE` (6a/6b) branch.
+
+---
+
+## 5. SP Logic — Per-Customer Branches
+
+### ELSE IF @CustId = '1055'
+
+**Layout (from sample file `BillingFile_1055_49264.txt`):**
+
+| Pos (est.) | Field | Width | Source / Value |
+|---|---|---|---|
+| 1–9 | AgencyId | 9 | `ri.AgencyId` |
+| 10–11 | Spaces | 2 | filler |
+| 12–33 | LoanRef | 22 | `RIGHT('0000000' + ri.CustId, 7) + ri.LoanId` left-padded to 22 |
+| 34–46 | TaxId | 13 | `ri.TaxId` right-justified in 13 chars ⚠️ |
+| 47 | Space | 1 | filler |
+| 48–57 | DiscTotal | 10 | `'0000000000'` |
+| 58–66 | Inst1 | 9 | `ISNULL(ri.FirstInstallAmt, 0)` CENTS |
+| 67–75 | Inst2 | 9 | `ISNULL(ri.SecondInstallAmt, 0)` CENTS |
+| 76–84 | Inst3 | 9 | `ISNULL(ri.ThirdInstallAmt, 0)` CENTS |
+| 85–93 | Inst4 | 9 | `ISNULL(ri.FourthInstallAmt, 0)` CENTS |
+| 94–102 | InstTotal | 9 | sum of 4 installments, CENTS |
+| 103–111 | Unknown | 9 | ⚠️ TBD (9 zeros seen in sample) |
+| 112–?? | PayeeCode | ⚠️ TBD | AC3 transform of `VendorAgencyId` |
+| ?? | Trailing | ⚠️ TBD | — |
+| end | `60` | 2 | ⚠️ TBD — LienSeq output or constant |
+
+```sql
+ELSE IF @CustId = '1055'
+BEGIN
+    SELECT
+        ri.AgencyId,
+        RIGHT('0000000' + ri.CustId, 7) + ri.LoanId       AS LoanRef,
+        ri.TaxId,
+        '0000000000'                                       AS DiscTotal,
+        ISNULL(ri.FirstInstallAmt,  0)                     AS Inst1,
+        ISNULL(ri.SecondInstallAmt, 0)                     AS Inst2,
+        ISNULL(ri.ThirdInstallAmt,  0)                     AS Inst3,
+        ISNULL(ri.FourthInstallAmt, 0)                     AS Inst4,
+        ISNULL(ri.FirstInstallAmt,  0) + ISNULL(ri.SecondInstallAmt, 0)
+            + ISNULL(ri.ThirdInstallAmt, 0) + ISNULL(ri.FourthInstallAmt, 0) AS InstTotal,
+        CASE
+            WHEN LEN(ri.VendorAgencyId) = 10 AND LEFT(ri.VendorAgencyId, 2) = '48'
+                THEN '9' + SUBSTRING(ri.VendorAgencyId, 3, 8)
+            WHEN LEN(ri.VendorAgencyId) = 10
+                THEN LEFT(ri.VendorAgencyId, 7) + RIGHT(ri.VendorAgencyId, 2)
+            ELSE ri.VendorAgencyId
+        END                                                AS PayeeCode,
+        ri.LienSeq
+    FROM [db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems] ri WITH (NOLOCK)
+    WHERE ri.CustId     = @CustId
+      AND ri.CTARunName = @RunName
+      AND CAST(ri.CTARunDate AS DATE) = CAST(@RunDate AS DATE)
+      AND ri.Paid_Items = 'Y'
+      AND (ri.DROPPED IS NULL OR ri.DROPPED <> 'Y')
+    ORDER BY ri.LoanId;
+END
+```
+
+---
+
+### ELSE IF @CustId = '1113'
+
+**Layout (from sample file `BillingFile_1113_48543.txt`):**
+
+| Pos (est.) | Field | Width | Source / Value |
+|---|---|---|---|
+| 1–30 | ParcelRef | ⚠️ ~30 | Complex parcel reference — see note below |
+| 31–43 | Spaces | ⚠️ ~13 | padding |
+| 44–56 | AmountField | ⚠️ ~13 | TBD |
+| 57 | Space | 1 | filler |
+| 58–62 | FIPSCode | 5 | `ci.FIPS` from `lac_CountyInfo` |
+| 63–66 | Spaces | 4 | filler |
+| 67–76 | DiscTotal | 10 | `'0000000000'` |
+| 77–85 | Inst1 | 9 | CENTS |
+| 86–94 | Inst2 | 9 | CENTS |
+| 95–103 | Inst3 | 9 | CENTS |
+| 104–112 | Inst4 | 9 | CENTS |
+| 113–?? | ReferenceNo | ⚠️ TBD | `ri.VendorAgencyId` or other ref field |
+| end | `22` | 2 | ⚠️ TBD — constant or service code |
+
+> ⚠️ **ParcelRef field structure:** Sample lines start with patterns like `19007000000000111310023760`. This embeds AgencyId-derived state code + CustId (zero-padded, at chars 15–18) + TaxId/parcel. Exact composition TBD from billing spec.
+
+> **FIPS JOIN:** `LEFT JOIN [LASCommon].[dbo].[lac_CountyInfo] ci WITH (NOLOCK) ON ci.FIPS = SUBSTRING(ri.AgencyId, 3, 3)` — exact join key TBD (confirm: is FIPS always chars 3–5 of AgencyId?).
+
+```sql
+ELSE IF @CustId = '1113'
+BEGIN
+    SELECT
+        -- ⚠️ ParcelRef composition TBD — placeholder shows components separately
+        ri.AgencyId,
+        RIGHT('0000000' + ri.CustId, 7) + ri.LoanId       AS LoanRef,
+        ci.FIPS                                            AS FIPSCode,
+        ri.TaxId,
+        '0000000000'                                       AS DiscTotal,
+        ISNULL(ri.FirstInstallAmt,  0)                     AS Inst1,
+        ISNULL(ri.SecondInstallAmt, 0)                     AS Inst2,
+        ISNULL(ri.ThirdInstallAmt,  0)                     AS Inst3,
+        ISNULL(ri.FourthInstallAmt, 0)                     AS Inst4,
+        ri.VendorAgencyId                                  AS PayeeCode,
+        ri.LienSeq
+    FROM [db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems] ri WITH (NOLOCK)
+    LEFT JOIN [LASCommon].[dbo].[lac_CountyInfo] ci WITH (NOLOCK)
+        ON ci.FIPS = SUBSTRING(ri.AgencyId, 3, 3)  -- ⚠️ confirm exact FIPS join key
+    WHERE ri.CustId     = @CustId
+      AND ri.CTARunName = @RunName
+      AND CAST(ri.CTARunDate AS DATE) = CAST(@RunDate AS DATE)
+      AND ri.Paid_Items = 'Y'
+      AND (ri.DROPPED IS NULL OR ri.DROPPED <> 'Y')
+    ORDER BY ri.LoanId;
+END
+```
+
+---
+
+### ELSE IF @CustId = '2145'
+
+**Layout (from sample file `BillingFile_2145_48121.txt`):**
+
+| Pos (est.) | Field | Width | Source / Value |
+|---|---|---|---|
+| 1–9 | AgencyId | 9 | `ri.AgencyId` |
+| 10–11 | Spaces | 2 | filler |
+| 12–33 | LoanRef | 22 | `RIGHT('0000000' + ri.CustId, 7) + ri.LoanId` |
+| 34–46 | TaxId/Field | 13 | ⚠️ Sample shows `0000000000010` — field TBD |
+| 47 | Space | 1 | filler |
+| 48–57 | DiscTotal | 10 | `'0000000000'` |
+| 58–66 | Inst1 | 9 | CENTS |
+| 67–75 | Inst2 | 9 | CENTS |
+| 76–84 | Inst3 | 9 | CENTS |
+| 85–93 | Inst4 | 9 | CENTS |
+| 94–102 | InstTotal | 9 | sum of 4 installments, CENTS |
+| 103–?? | PayeeCode | ⚠️ TBD | AC3 transform of `VendorAgencyId` |
+| ??–?? | Extra chars | ⚠️ TBD | Sample shows chars like `2A1`, `A03301` after PayeeCode |
+| end | ServiceBureau | 2 | `ri.CSP_XCP_SRV_BUREAU` ⚠️ see below |
+
+> ⚠️ **ServiceBureau discrepancy (O4):** DB column `CSP_XCP_SRV_BUREAU` is varchar(2) with **alphabetic** codes (`SE`, `AH`, `CC`, etc.). Sample file shows **numeric** `10`/`20`. These cannot be the same column directly. A mapping table or different column may be needed. **Cannot finalise 2145 ServiceBureau field until resolved.**
+
+```sql
+ELSE IF @CustId = '2145'
+BEGIN
+    SELECT
+        ri.AgencyId,
+        RIGHT('0000000' + ri.CustId, 7) + ri.LoanId       AS LoanRef,
+        ri.TaxId,                                          -- ⚠️ field TBD (sample shows 0000000000010)
+        '0000000000'                                       AS DiscTotal,
+        ISNULL(ri.FirstInstallAmt,  0)                     AS Inst1,
+        ISNULL(ri.SecondInstallAmt, 0)                     AS Inst2,
+        ISNULL(ri.ThirdInstallAmt,  0)                     AS Inst3,
+        ISNULL(ri.FourthInstallAmt, 0)                     AS Inst4,
+        ISNULL(ri.FirstInstallAmt,  0) + ISNULL(ri.SecondInstallAmt, 0)
+            + ISNULL(ri.ThirdInstallAmt, 0) + ISNULL(ri.FourthInstallAmt, 0) AS InstTotal,
+        CASE
+            WHEN LEN(ri.VendorAgencyId) = 10 AND LEFT(ri.VendorAgencyId, 2) = '48'
+                THEN '9' + SUBSTRING(ri.VendorAgencyId, 3, 8)
+            WHEN LEN(ri.VendorAgencyId) = 10
+                THEN LEFT(ri.VendorAgencyId, 7) + RIGHT(ri.VendorAgencyId, 2)
+            ELSE ri.VendorAgencyId
+        END                                                AS PayeeCode,
+        ri.CSP_XCP_SRV_BUREAU                              AS ServiceBureau  -- ⚠️ mapping TBD
+    FROM [db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems] ri WITH (NOLOCK)
+    WHERE ri.CustId     = @CustId
+      AND ri.CTARunName = @RunName
+      AND CAST(ri.CTARunDate AS DATE) = CAST(@RunDate AS DATE)
+      AND ri.Paid_Items = 'Y'
+      AND (ri.DROPPED IS NULL OR ri.DROPPED <> 'Y')
+    ORDER BY ri.LoanId;
+END
+```
+
+---
+
+### ELSE IF @CustId = '2195'
+
+**Layout (from sample file `BillingFile_2195_25444.txt`) — most complete:**
+
+| Pos | Field | Width | Source / Value |
+|---|---|---|---|
+| 1–9 | TBMID | 9 | `RIGHT('000000000' + ri.CSP_SRV_SYS_PROP_ID, 9)` |
+| 10–11 | Spaces | 2 | filler |
+| 12–18 | CustId part of LoanRef | — | see LoanRef below |
+| 12–33 | LoanRef | 22 | `RIGHT('0000000' + ri.CustId, 7) + ri.LoanId` |
+| 34–53 | TaxId | 20 | `RIGHT(REPLICATE('0', 20) + ri.TaxId, 20)` (zero-padded) |
+| 54–61 | ContractId | 8 | `'99999999'` (literal, always) |
+| 62–65 | LienSeq | 4 | `ri.LienSeq` |
+| 66–75 | DiscTotal | 10 | `'0000000000'` |
+| 76–84 | Inst1 | 9 | CENTS |
+| 85–93 | Inst2 | 9 | CENTS |
+| 94–102 | Inst3 | 9 | CENTS |
+| 103–111 | Inst4 | 9 | CENTS |
+| 112–120 | InstTotal | 9 | sum of 4 installments, CENTS |
+| 121–?? | PropertyRef | ⚠️ TBD | Reference/property fields (vary by row in sample) |
+| end | ServiceBureau | 2 | `'20'` (hardcoded) |
+
+```sql
+ELSE IF @CustId = '2195'
+BEGIN
+    SELECT
+        RIGHT('000000000' + ri.CSP_SRV_SYS_PROP_ID, 9)    AS TBMID,
+        RIGHT('0000000' + ri.CustId, 7) + ri.LoanId        AS LoanRef,
+        RIGHT(REPLICATE('0', 20) + ri.TaxId, 20)           AS TaxId,
+        '99999999'                                          AS ContractId,
+        ri.LienSeq,
+        '0000000000'                                        AS DiscTotal,
+        ISNULL(ri.FirstInstallAmt,  0)                      AS Inst1,
+        ISNULL(ri.SecondInstallAmt, 0)                      AS Inst2,
+        ISNULL(ri.ThirdInstallAmt,  0)                      AS Inst3,
+        ISNULL(ri.FourthInstallAmt, 0)                      AS Inst4,
+        ISNULL(ri.FirstInstallAmt,  0) + ISNULL(ri.SecondInstallAmt, 0)
+            + ISNULL(ri.ThirdInstallAmt, 0) + ISNULL(ri.FourthInstallAmt, 0) AS InstTotal,
+        ri.VendorAgencyId                                   AS PayeeCode,
+        '20'                                                AS ServiceBureau
+        -- ⚠️ PropertyRef fields at pos 121+ TBD (sample shows parcel-style refs varying by row)
+    FROM [db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems] ri WITH (NOLOCK)
+    WHERE ri.CustId     = @CustId
+      AND ri.CTARunName = @RunName
+      AND CAST(ri.CTARunDate AS DATE) = CAST(@RunDate AS DATE)
+      AND ri.Paid_Items = 'Y'
+      AND (ri.DROPPED IS NULL OR ri.DROPPED <> 'Y')
+    ORDER BY ri.LoanId;
+END
+```
+
+---
+
+### ELSE IF @CustId = '2207'  — 🔴 BLOCKED
+
+**Sample file provided was empty. Layout and SP SELECT cannot be defined.**
+
+**Known requirements (implement once spec is provided):**
+- `SequenceNo` = `ri.LienSeq`
+- `NumberOfInstallments_1` = correlated subquery:
+
+```sql
+(SELECT MAX(CAST(ri2.InstallmentInd AS INT))
+ FROM [db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems] ri2 WITH (NOLOCK)
+ WHERE ri2.BillToID  = ri.BillToID
+   AND ri2.AgencyId  = ri.AgencyId
+   AND ri2.LDBatchId = ri.LDBatchId
+   AND CAST(ri2.InstallmentInd AS INT) BETWEEN 1 AND 4
+) AS NumberOfInstallments
+```
+
+All other fields, layout JSON, and line length require the billing spec or a populated sample file.
+
+---
+
+## 6. SP Design Summary
+
+| Branch | Status | Key Difference |
+|---|---|---|
+| `ELSE IF @CustId = '1055'` | Draft — layout TBD | AgencyId at start; AC3 PayeeCode; unknown `60` field |
+| `ELSE IF @CustId = '1113'` | Draft — ParcelRef + `22` field TBD | Complex parcel ref; FIPS join |
+| `ELSE IF @CustId = '2145'` | Draft — ServiceBureau mapping TBD | AC3 PayeeCode; per-row ServiceBureau |
+| `ELSE IF @CustId = '2195'` | Near-complete — PropertyRef TBD | TBM_ID; ContractId=99999999; 20-char TaxId |
+| `ELSE IF @CustId = '2207'` | 🔴 Blocked | Empty sample; needs spec |
+| `ELSE` | Unchanged | All 6a/6b customers preserved |
+
+---
+
+## 7. Implementation Order
+
+```
+1. Resolve O1–O4 (2207 spec, 1055 trailing field, 1113 parcel struct, 2145 ServiceBureau mapping)
+2. SQL — snapshot current usp_cta_GetTARBillingFile_sel (pre-change rollback)
+3. SQL — add 4 ELSE IF blocks for 1055, 1113, 2145, 2195
+4. SQL — finalise layout JSONs and insert 4 seed rows in lac_BillingFileLayout
+5. Regression test: 6a/6b customers still work (1085, 1090, 1096, 2132, 1072, 2118, 2161, 2164, 2215)
+6. End-to-end test: each 6c customer against sample file
+7. 2207: implement separately after spec is provided
+```
+
+---
+
+## 8. Open Assumptions
+
+| # | Assumption | Impact if Wrong |
+|---|---|---|
+| A1 | `60` at end of 1055 lines = `LienSeq` output (2-char), or a constant field | Layout JSON changes; different source column |
+| A2 | `22` at end of 1113 lines = constant service/state code | Layout JSON changes |
+| A3 | `CSP_XCP_SRV_BUREAU` alphabetic codes somehow map to `10`/`20` in 2145 file — mapping unknown | 2145 ServiceBureau cannot be finalised until resolved |
+| A4 | YearType `'F'` = prior year (`WHERE YearType = 'F'` filter) — only `'C'` and `'F'` exist in DB | Filter may be wrong if `'F'` means something else |
+| A5 | `VendorAgencyId` is the PayeeCode for 2195 (confirmed for 1055/2145; not explicitly confirmed for 2195) | 2195 PayeeCode field may use different column |
+| A6 | All 1055/1113/2145 field positions derived from sample file analysis, not confirmed against billing spec | Layout JSON field widths may need adjustment |

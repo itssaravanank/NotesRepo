@@ -1,0 +1,95 @@
+Q1. What defines a "due item" for the loan/lien counts on manual jobs (AC1a), and what defines a "pay item" for the total approved amount (AC1b)?
+    
+    Context : lat_Manual_TAR_Items_385.DO_NOT_PAY_IND and PMT_PKG_IND — the exact columns the mass-job SP (sp_TaxAmount_Reports_Summary) uses to filter "approved"/"pay" items via pra_hit_code='1', pmt_pkg_ind IN ('1','5'), DO_NOT_PAY_IND != '1' — are hardcoded to 'N' by usp_ManualTAR_LoadAndGenerateJobNames for every manual line item. There is no populated equivalent of the mass pipeline's real due/pay flags on the manual item table today.
+    
+    Impact  : Blocks writing any loan/lien/approved-amount aggregation for manual jobs. Need to know whether: (a) ALL rows in lat_Manual_TAR_Items_385 for a manual job should simply be counted as "due"/"pay" items (since the manual pipeline only loads eligible manual OI items to begin with), or (b) new columns/logic must be added to distinguish due vs not-due, pay vs not-pay within a manual job's items.
+    
+    Status  : ⏳ Pending
+
+Q2. Should the existing sp_TaxAmount_Reports_Summary be modified (e.g. UNION a manual-job branch) to also return manual job rows, or should a new/separate SP be created and combined at the BLL/DAL or web-service layer?
+    
+    Context : sp_TaxAmount_Reports_Summary INNER JOINs lat_Transmittal (manual jobs have no transmittal row) and GROUPs/HAVINGs on mass-job-specific columns (HandleManualOnTape, HandleManualNotOnTape, PaidItemCount) that don't exist in the same form on lat_Manual_TAR_Reports_384/_385. The table DDL for lat_Manual_TAR_Reports_384 has a forward-looking comment calling this exact merge "Phase 5," not yet implemented anywhere.
+    
+    Impact  : Determines which layer changes (SQL SP shape, ReportsViewedBLL/DAL parameter signatures, TaxServiceCore reflection args) are needed, and whether the modern vs Classic API pattern applies to the new manual-job read path. Two or more valid approaches exist here per the Clarification-First rule.
+    
+    Status  : ⏳ Pending
+
+Q3. What is the full, exact list of values for the new "Run Type" filter dropdown, and how is "Manual" computed/distinguished from "Initial"/"Supplemental" given JobSupInd is hardcoded 'N' (=Initial) on every manual job row?
+    
+    Context : PO comment says the dropdown defaults to "Show All." The screenshot shows a "Filter for Run Type" callout at top of the grid. Mass jobs derive Run Type from JobSupInd (Y=Supp/N=Initial); manual jobs always have JobSupInd='N', so a manual job would look identical to a mass "Initial" job unless a distinct source/marker is used to label it "Manual."
+    
+    Impact  : Blocks the filter dropdown options list, the grid column value, and the SQL CASE/UNION logic that assigns the "Manual" label.
+    
+    Status  : ⏳ Pending
+
+Q4. Does "TAR (run type: initial and supplemental) items are never shown in manual job views" (AC4) mean the Run Type filter, when set to "Manual," must show ONLY rows sourced from lat_Manual_TAR_Reports_384 (never rows from Lat_TaxAmount_Summary even if some had a hypothetical manual flag)? Is this purely a data-source segregation rule, or does it also restrict what happens when "All" is selected (i.e., do manual and mass rows ever get merged/totaled together in one grid view, or just listed side-by-side)?
+    
+    Context : Per prior research, "Initial"/"Supplemental" is the same JobSupInd-derived label on both tables, but the two data sources are structurally disconnected today. PO comment says default is "Show All" (both mass and manual together).
+    
+    Impact  : Determines whether "All" literally UNIONs both sources into one grid (with a Run Type column distinguishing Manual vs Initial vs Supplemental per row), which changes the SP/UNION design in Q2.
+    
+    Status  : ⏳ Pending
+
+Q5. Where does the manual-job hyperlink drill-through actually land, and is extending the Disbursement tab's data path to read lat_Manual_TAR_Reports_384/_385 in scope for this story?
+    
+    Context : PO comment: "redirect the user for any given manual TAR job to Disbursements tab." The existing Disbursement tab (TaxAmtDisbursement.cshtml / SP_TaxAmount_DisbursementRunJobSummary) only reads lat_RPT_TCS384/385_365 — feeding it a manual job's RunName today would return zero rows.
+    
+    Impact  : If in scope, this adds a second SP/BLL/DAL change (Disbursement summary path) beyond the Summary grid itself — significant scope increase. If out of scope, the hyperlink may need a different/new lightweight detail view instead of reusing TaxAmtDisbursement, or this story only builds the link and a follow-up ticket wires up the destination.
+   
+    Status  : ⏳ Pending
+
+Q6. Where and how should the alert message ("Manual disbursement jobs are processed separately...") be shown, and does "Enforce separation between manual and mass disbursements" (AC5a) require any actual validation/blocking logic beyond displaying this text?
+    
+    Context : AC6 says show it "whenever manual jobs are present" (implies a runtime check of the loaded grid data, similar in spirit to the existing #lError / ShowHistoryNote banners already on TaxAmountReports.cshtml). AC5a is listed as a sub-bullet under "Enforce separation" but the only described behavior anywhere in the story is the static alert text — no batch/wire-generation validation rule is otherwise specified.
+    
+    Impact  : If AC5a requires real enforcement (e.g. preventing a manual job from being included in a mass disbursement batch/wire file), that's a separate, currently-unscoped change to the disbursement batch-file generation pipeline (USP_DisbursementRequest_IU / USP_GenerateFakejobs area) — a different module with its own risk. If it's just the static banner, scope stays contained to the Summary grid.
+    
+    Status  : ⏳ Pending
+
+Q7. How should the Transmittal tab hiding actually work, mechanically?
+   
+    Context : PO comment: "the transmittal will be hidden only when the user selects a manual TAR job" (i.e., on drill-through, not on the Summary page itself). All 5 tab-strip views (TaxAmountReports.cshtml, TaxAmtTransmittal.cshtml, TaxAmtDisbursement.cshtml, TaxAmtEditBalance.cshtml, TaxAmtExceptions.cshtml) currently hardcode the identical unconditional tab-strip markup — there is no existing ViewModel flag or query-string-driven conditional to hide a tab.
+    
+    Impact  : Needs a decision on how the "this job is manual" signal is carried through the drill-through navigation (new query param? ViewModel property? job-name pattern check?) and confirmation that only the Transmittal `<li>` needs conditional wrapping, not a broader tab-visibility framework.
+   
+    Status  : ⏳ Pending
+
+Q8. Does "enrolled customers" (In Scope item 1) mean the same lac_CustomerProfile.HandleManualPaymentsInd = 'Y' flag already used by usp_ManualTAR_LoadAndGenerateJobNames to select eligible customers, or a different/new enrollment concept?
+   
+    Context : No other "enrollment" flag for manual TAR was found anywhere in the schema search.
+    
+    Impact  : Confirms (or not) that no new customer-eligibility flag/table is needed — the existing flag can just be relied upon transitively (any customer with rows in lat_Manual_TAR_Reports_384 is by definition enrolled).
+    
+    Status  : ⏳ Pending
+
+Q9. Does this feature apply to both the Current tab (menu='C') and the History tab (menu='H'), or Current only?
+    
+    Context : The screenshot and PO comments only reference the "Current Tax Payment - Job Summary" screen. sp_TaxAmount_Reports_Summary's @ReportType parameter and isHistory column already distinguish Current vs History, and the manual pipeline has no isHistory-equivalent concept (rows are never archived to a "history" state today).
+    
+    Impact  : If History is in scope, need to define what "historical manual job" means (manual jobs don't currently have a completion/history transition). If Current-only, that constrains the SP change to the @ReportType='C' branch only, simplifying the change.
+   
+    Status  : ⏳ Pending
+
+
+==================================================================================================================================================================================================================================================================
+
+
+Here's a simplified version you can paste directly into Azure DevOps for PO/Lead review:
+
+---
+
+**Open Questions — US-112929 [TAR] Summary: Manual Jobs**
+
+1. **Run Type filter options** — When the user opens the new "Run Type" dropdown at the top of the grid, what options should they see? For example: *All, Initial, Supplemental, Manual* — or just *All, Mass, Manual*?
+
+2. **How to count "due" vs "approved" items for Manual jobs** — For mass jobs, the system already has a rule for deciding which loans/liens count as "due" and which count as "approved/paid." Manual jobs use a different data source that isn't marked with the same flags yet. Can we apply the same rule to Manual jobs (loan/lien counts = items not marked "do not pay"; approved amount = items marked as paid)? If a Manual job hasn't been disbursed yet, this would show $0 approved amount until it's processed — is that expected?
+
+3. **Current vs. History for Manual jobs** — Mass jobs have a clear flag that moves them from "Current" to "History." Manual jobs don't have this yet. How should the system decide when a Manual job should move to the History tab?
+
+4. **Does the Disbursement page need to work for Manual jobs, or just the link?** — The Disbursement tab currently doesn't know how to read Manual job data at all. Clicking a Manual job's link today would take the user to a blank/broken Disbursement page. Should this ticket also fix the Disbursement page to show Manual job data, or is that planned as a separate/future story, with this ticket only needing to get the link/navigation working?
+
+5. **Where exactly should the Transmittal tab be hidden?** — Per the PO note, it sounds like the Transmittal tab should only be hidden after a user clicks into a specific Manual job (not on the main Summary page, which always shows all tabs). Please confirm this understanding is correct.
+
+6. **Should the Excel export also include Manual jobs?** — The "Download"/"Export" buttons on this page use a separate report behind the scenes. Should Manual jobs also appear in the exported Excel file, or is that out of scope for now?
+
+7. **When should the alert message appear?** — Should the "Manual disbursement jobs are processed separately..." alert show any time the customer has Manual jobs at all, or only when Manual jobs are currently visible in the grid (i.e., not hidden by a filter)?

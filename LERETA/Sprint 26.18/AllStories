@@ -1,0 +1,476 @@
+I have enough context from the transcript to reconstruct all four story question lists. Let me now compile the full story-wise list.
+
+---
+
+## Questions for Azure DevOps Comments — Stories 6b, 6c, 6d, 6e
+
+---
+
+## US-126531 — 6b: ELD + Payee Layouts (Customers 1072, 2118, 2215, 2161, 2164)
+
+---
+
+**Q1 — AC2: Payee Resolution Flag — Which Column Controls It? (Lead to Confirm)**
+
+AC2 says some customers should show the **AgencyNumber** field and others should show the **PayeeCode** field, based on a "per-customer configuration flag." Which column in the database controls this choice?
+
+Our investigation found no existing flag column for this. Candidates:
+- A new column on `LASCommon.dbo.lac_BillingFileLayout` (e.g., `UseAgencyNumberInd`)
+- Handled directly in each customer's stored procedure (no flag needed, each SP knows which field to use)
+
+**Our recommendation:** Handle it in each customer's SP — no new column needed, since each customer already has a dedicated SP. But please confirm this is acceptable.
+
+---
+
+**Q2 — AC2: AgencyNumber Source Column (Lead to Confirm) ✅**
+
+Which column in `db_TaxAmtReports.dbo.tbl_cta_ReportedItems` is the "AgencyNumber" referenced in AC2?
+
+**Confirmed during analysis:** `VendorAgencyId VARCHAR(10)` — maps from source field `PRA_VENDOR_AGNC_ID`.
+
+---
+
+**Q3 — AC3: Michigan County Code — Replacement for the 83-Branch CASE Statement (Lead to Confirm)**
+
+The story background says the original DTSX used an 83-branch CASE statement to derive a 2-character Michigan county code from the payee code, but "PayeeCode does not exist in LeretaNet."
+
+In LERETA, county information is stored in `LASCommon.dbo.lac_CountyInfo` (columns: `state_code`, `county_code`, `FIPS`, `IBM`). The agency join pattern uses `SUBSTRING(AgencyId, 1, 2)` = state code and `SUBSTRING(AgencyId, 3, 3)` = county code.
+
+**Question for Lead:** Can the Michigan county prefix be derived from `lac_CountyInfo` using the existing AgencyId join pattern? Specifically — does `IBM VARCHAR(5)` in `lac_CountyInfo` store the 2-char county code that was previously derived by the 83-branch CASE, or does a separate mapping table need to be created?
+
+> **DB verify query:** `SELECT state_code, county_code, FIPS, IBM FROM [LASCommon].[dbo].[lac_CountyInfo] WHERE state_code = '26' ORDER BY county_code`
+
+---
+
+**Q4 — AC4: Customer 1072 — Sequence Number Filter (Lead to Confirm)**
+
+AC4 says customer 1072 requires filtering rows where the sequence number is **outside 1–4**. Which column in `db_TaxAmtReports.dbo.tbl_cta_ReportedItems` is the "sequence number" here?
+
+Candidates:
+- `HdrInstall VARCHAR(1)` — current installment header
+- `InstallmentInd VARCHAR(1)` — installment indicator (values 1–4)
+- `LienSeq VARCHAR(4)` — lien sequence number
+
+**Our recommendation:** `InstallmentInd` is most likely — it directly maps to installment numbers 1–4. The SP would add `WHERE InstallmentInd IN ('1','2','3','4')`. Please confirm.
+
+---
+
+**Q5 — AC3/AC5: Layout line length and field widths (Lead to Confirm)**
+
+From the sample files for customers 2161 and 2164, the output appears to be 118 characters: the first 82 chars match the foundation (6a) layout, followed by a 10-char agency code and a 26-char agency name.
+
+Please confirm: is the total line length 118 characters for the ELD + Payee layouts (customers 2118, 2215, 2161, 2164)?
+
+---
+
+---
+
+## US-126535 — 6c: Pattern 3 Layouts (Customers 1055, 1113, 2145, 2195, 2207)
+
+---
+
+**Q1 — AC3: Payee Code (PayeeCode field) Source Column (Lead to Confirm) ✅**
+
+Which column is the "PayeeCode" (also called ACM Payee Code) for customers 1055, 2145?
+
+**Confirmed:** `VendorAgencyId VARCHAR(10)` from `db_TaxAmtReports.dbo.tbl_cta_ReportedItems`.
+
+---
+
+**Q2 — AC4: FIPS / State-County Code Derivation (Lead to Confirm) ✅**
+
+How is the 5-character state/county FIPS code derived for customers 1113 and 2207?
+
+**Confirmed:** Join `[LASCommon].[dbo].[lac_CountyInfo]` using `SUBSTRING(AgencyId,1,2) = ci.state_code AND SUBSTRING(AgencyId,3,3) = ci.county_code` → `ci.FIPS VARCHAR(5)` gives the 5-char code.
+
+---
+
+**Q3 — AC4: Reference Number Source Column (Lead to Confirm) ✅**
+
+Which column is the "reference number" field in the billing file for customers 1113 and 2207?
+
+**Confirmed:** `BillNumber VARCHAR(10)` from `db_TaxAmtReports.dbo.tbl_cta_ReportedItems` (mapped from `PRA_BILL_NUMBER`). Truncated/padded to 9 characters in the output.
+
+---
+
+**Q4 — AC4: Prior-Year Flag Source Column (Lead to Confirm) ✅**
+
+Which column is the "prior-year flag" used in the billing file for customers 1113 and 2207?
+
+**Confirmed:** `YearType VARCHAR(1)` from `db_TaxAmtReports.dbo.tbl_cta_ReportedItems` (mapped from `PRA_YEAR_TYPE`).
+
+---
+
+**Q5 — AC5: TBM ID / PropertyID Source Column (Lead to Confirm) ✅**
+
+Which column is the "TBM ID" (also called PropertyID) for customer 2195?
+
+**Confirmed:** `CSP_SRV_SYS_PROP_ID VARCHAR(7)` from `db_TaxAmtReports.dbo.tbl_cta_ReportedItems`, zero-padded to 9 characters.
+
+---
+
+**Q6 — AC5: Discounted Total Field — Source Unknown (PO/Lead to Confirm)**
+
+In the Pattern 3 layout, there is a "discounted total" field. What is the source for this value?
+
+Two candidates exist in `db_TaxAmtReports.dbo.tbl_cta_ReportedItems`:
+- **Option A:** Sum of the four installment amounts (`FirstInstallAmt + SecondInstallAmt + ThirdInstallAmt + FourthInstallAmt`)
+- **Option B:** `EftAmt DECIMAL(9,2)` — the EFT/electronic payment amount
+
+**Question for PO/Lead:** Which of these is the correct source for the "discounted total" field?
+
+---
+
+---
+
+## US-126536 — 6d: Pattern 3 Layouts — Elevate Customers (1061, 1103, 2130, 2162, 2200)
+
+---
+
+**Q1 — AC2: Architecture (Spike Result) — Lead to Confirm**
+
+The story says implementation depends on a spike to decide how to pull data. The view `vBillingFiles` mentioned in the story does **not** exist in the LERETA database — it is an Elevate-only object.
+
+**Our recommendation:** Continue the same approach used for Stories 6a, 6b, and 6c — each customer gets its own stored procedure that queries `db_TaxAmtReports.dbo.tbl_cta_ReportedItems` directly with joins.
+
+**Question for Lead:** Has the spike been completed? If yes, what was the decision — shared view or individual stored procedures per customer?
+
+---
+
+**Q2 — Number of Installments Column (Lead to Confirm)**
+
+Two columns in `db_TaxAmtReports.dbo.tbl_cta_ReportedItems` store the number of installments:
+- `CSP_NO_OF_INSTALLS` — the base/standard value
+- `CSP_XAG_NO_OF_INSTALLS` — an agency-level override (more specific)
+
+**Our recommendation:** Use the agency-level override (`CSP_XAG_NO_OF_INSTALLS`) when it has a value, and fall back to the base (`CSP_NO_OF_INSTALLS`) when the override is empty.
+
+**Question for Lead:** Is this priority correct — agency override first, then base?
+
+---
+
+**Q3 — State/County Code Field — IBM Code vs FIPS (Lead to Confirm)**
+
+For Customer 2200 (California), the sample file shows `06730` in the state/county field. California county code `730` does **not** exist in the standard US FIPS system (California FIPS counties only go up to 115). 
+
+The `LASCommon.dbo.lac_CountyInfo` table has two code columns: `FIPS VARCHAR(5)` (official US government code) and `IBM VARCHAR(5)` (IBM mainframe code, which can use non-standard values like 730 for California).
+
+**Our recommendation:** Use the IBM code (`ci.IBM`) when available, falling back to FIPS (`ci.FIPS`) when IBM is empty.
+
+**Question for Lead:** Please confirm — for the state/county field, should we use the `IBM` code or the `FIPS` code from `lac_CountyInfo`?
+
+> **Verify query:** `SELECT state_code, county_code, FIPS, IBM FROM [LASCommon].[dbo].[lac_CountyInfo] WHERE state_code = '06' AND county_code = '730'`
+
+---
+
+**Q4 — Agency Code Field: Which Customers Use AgencyNumber vs PayeeCode? (PO + Lead to Confirm)**
+
+Based on the sample files:
+- **Customers 1061, 2130, 2162, 2200** appear to use `VendorAgencyId` (AgencyNumber, up to 10 chars) from `db_TaxAmtReports.dbo.tbl_cta_ReportedItems`
+- **Customer 1103** appears to use `AgencyId` (PayeeCode, 9 chars) from `db_TaxAmtReports.dbo.tbl_cta_ReportedItems`
+
+**Questions:**
+1. Please confirm this mapping is correct.
+2. Is there any customer where this choice might need to change in the future? (If yes, we should add a configurable flag to the database instead of hardcoding per stored procedure.)
+
+---
+
+**Q5 — Customer 2130: Reference Field Contains Property Address (PO + Lead to Confirm)**
+
+In the sample file for Customer 2130, the reference field contains a **property street address** (e.g., `515-EXPOSITIONBL`, `6425-ARGONNEBL`) instead of a bill number.
+
+In `db_TaxAmtReports.dbo.tbl_cta_ReportedItems`, the property address is stored in:
+- `SitusStreeNumber VARCHAR(9)` — street number (note: column name has a typo with two e's)
+- `SitusStreetName VARCHAR(30)` — street name
+
+**Our recommendation:** Build the reference as `{StreetNumber}-{StreetName}` truncated to fit the field width (e.g., `515-EXPOSITIONBL`).
+
+**Questions:**
+1. Please confirm — for Customer 2130, the reference field should contain the **property address**, not a bill number.
+2. Is the format always `{StreetNumber}-{StreetName}`? Could some rows have no street number?
+
+---
+
+**Q6 — Blank/Null Rows in Customer 1061 Sample File (PO to Confirm)**
+
+The sample file for Customer 1061 contains `\N` rows between groups of properties. These appear to be null-value markers from the old system's export format — they are not real data records.
+
+**Our recommendation:** These rows will not appear in LERETA's output. The stored procedure's `WHERE Paid_Items = 'Y'` filter naturally excludes them.
+
+**Question for PO:** Is a clean sequential output (no blank lines between groups) acceptable? Or does the receiving system expect blank line separators between agency groups?
+
+---
+
+---
+
+## US-126537 — 6e: Special-Case Layouts (Customers 1063, 1114, 2141, 2259)
+
+---
+
+**Q1 — AC3/AC4: `yBillingFiles` View and `MatchID` from `Linkage` Table — Not in LERETA (Lead — Critical Blocker)**
+
+The story says customers 1114 and 2141 use data from a view called `yBillingFiles` and a table called `Linkage` (with a field called `MatchID`). **Neither `yBillingFiles`, `Linkage`, nor `MatchID` exist anywhere in the LERETA database.** These are Elevate-only objects.
+
+The story itself flags this as an open question: *"WHAT DO WE DO WITH MATCHID"*.
+
+**Questions for Lead:**
+1. Can you provide the definition (or column mapping) for the `yBillingFiles` view? Specifically: which LERETA tables does it join, and how does it compute "paired installments" (1st + 3rd together, 2nd + 4th together)?
+2. What is the LERETA equivalent of `MatchID` from the `Linkage` table? Based on the 2141 sample file, the values in that field look like formatted Ohio county parcel/TaxIDs — so our best guess is that `MatchID = TaxId` from `db_TaxAmtReports.dbo.tbl_cta_ReportedItems`. Please confirm or correct.
+
+> Until these two mappings are confirmed, we **cannot start implementation** for customers 1114 or 2141.
+
+---
+
+**Q2 — AC3: Contract Number Field for Customer 1114 — Source Not CSP_SRV_SYS_PROP_ID (Lead to Confirm)**
+
+AC3 says the contract number field contains the **TBM ID**. In previous stories (6c), TBM ID mapped to `CSP_SRV_SYS_PROP_ID VARCHAR(7)` in `db_TaxAmtReports.dbo.tbl_cta_ReportedItems` — a short 7-character numeric field.
+
+However, the sample file for Customer 1114 shows values like `A79499900101000` and `C81899902104600` in that position — 15 characters including letters. This does **not** match `CSP_SRV_SYS_PROP_ID`.
+
+**Question for Lead:** What is the correct source column for the "TBM ID / contract number" field for Customer 1114? Does it come from a different table accessed through `yBillingFiles`?
+
+---
+
+**Q3 — AC4: "Prior Year" Condition for Customer 2141 — `IsCurrentTaxYear` Column Not Found (Lead to Confirm)**
+
+AC4 says the total tax amount is only populated when `IsCurrentTaxYear = 0` (meaning the record is for a **prior tax year**). The column `IsCurrentTaxYear` does not exist in the LERETA database.
+
+The closest matching column in `db_TaxAmtReports.dbo.tbl_cta_ReportedItems` is:
+- **`YearType VARCHAR(1)`** — a flag that distinguishes current vs. prior tax year (from source field `PRA_YEAR_TYPE`)
+
+**Our recommendation:** Use `YearType` as the equivalent, where a specific value (e.g., `'P'`) means "prior year."
+
+**Question for Lead:** Which value of `YearType` means "prior year" (e.g., `'P'`, `'0'`, or something else)?
+
+---
+
+**Q4 — AC4: "RType Outside 1–4" Condition for Customer 2141 (Lead to Confirm)**
+
+AC4 says the total tax amount is also populated when "RType sequence is outside 1–4." Based on our earlier analysis, `RType` from Elevate maps to `CSP_TOI_REPT_TYPE VARCHAR(1)` in `db_TaxAmtReports.dbo.tbl_cta_ReportedItems`.
+
+**Our recommendation:** The condition would be: `CSP_TOI_REPT_TYPE NOT IN ('1','2','3','4')`.
+
+**Question for Lead:** Please confirm that `CSP_TOI_REPT_TYPE` is the correct column for RType, and that values 1–4 represent the standard installment sequence.
+
+---
+
+**Q5 — AC3: Null Amount Format for Customers 1114 and 2141 (PO/Lead to Confirm)**
+
+AC3 says: *"When AmtToPay is null, amount fields contain '0.00'."*
+
+However, the sample files consistently show `000` (three zeros) for zero/null amounts — not the string `0.00`. These are different: `0.00` is 4 characters with a decimal point, while `000` is 3 characters in the integer-cents format used throughout all other stories.
+
+**Question for PO/Lead:** When the amount is zero or null, should the output be `0.00` (with decimal) or `000` (integer cents, no decimal)? The sample files suggest `000` — please confirm.
+
+---
+
+**Q6 — AC5: What Separates Section 1 from Section 2 for Customer 2259? (Lead — Critical Blocker)**
+
+The story says the file must have two sections — Section 1 first, then Section 2. But there is no description of what SQL condition produces Section 1 rows vs Section 2 rows.
+
+From the sample file, Section 1 rows appear to use different agency codes (`1800500000`, `1810500000`) from Section 2 rows (`1813700000`). This suggests the two sections come from different agencies within the same TAR run, not from different installment logic.
+
+**Question for Lead:** What is the SQL condition or business rule that separates Section 1 rows from Section 2 rows for Customer 2259? Please provide either the Elevate query or a description of the rule (e.g., specific agency codes, date range, tax year condition, etc.).
+
+---
+
+**Q7 — AC5: Pattern 4 Layout Specification for Customer 2259 (Lead to Confirm)**
+
+AC5 says Section 2 follows "standard Pattern 4 fixed-width rows." The sample file for Customer 2259 shows a very wide layout (~200+ characters). We need the exact field-by-field layout definition to implement this correctly.
+
+**Question for Lead:** Can you provide the Pattern 4 layout spec — field name, width, alignment, and source column for each field?
+
+---
+
+**Q8 — AC5: Section 1 Shows Amounts — Clarification Needed (PO/Lead to Confirm)**
+
+AC5 says Section 1 rows have **all installment fields as spaces**. But the sample file shows amounts like `0000050137` in Section 1 rows.
+
+**Our interpretation:** Pattern 4 may have both "individual installment" fields (which are spaces in Section 1) AND a separate "total amount to pay" field (which IS populated in Section 1). If correct, Section 1 has a real total amount but blank individual installments.
+
+**Question for PO/Lead:** Please confirm whether this interpretation is correct — does Section 1 have a populated total amount field alongside blank installment fields?
+
+---
+
+**Q9 — AC2: Customer 1063 — Tax ID Alignment (PO to Confirm)**
+
+AC2 says the Tax ID field is **"left-padded with spaces to 28 chars."** In standard terminology, "left-padded" means spaces are added on the left (making the value right-aligned). However, the sample file clearly shows the Tax ID value on the **left** with trailing spaces on the right — this is left-aligned.
+
+**Question for PO:** Please confirm the correct alignment for the Tax ID field:
+- **Left-aligned** (value first, spaces after) — matches the sample file ✅
+- **Right-aligned** (spaces first, value at the end) — matches the AC wording literally
+
+--- 
+
+Completed: *Analyze 6e story and sample files* (2/2)
+
+All four stories compiled. Here's a quick reference:
+
+| Story | # Questions | Critical Blockers |
+|---|---|---|
+| **6b (US-126531)** | 5 | Q3 Michigan county mapping, Q4 sequence filter column |
+| **6c (US-126535)** | 6 | Q6 Discounted total source |
+| **6d (US-126536)** | 6 | Q1 Spike result, Q3 IBM vs FIPS county code |
+| **6e (US-126537)** | 9 | Q1 yBillingFiles + MatchID (blocks 1114 & 2141), Q6 2259 section split, Q7 Pattern 4 spec |
+
+Questions marked ✅ are already confirmed and included for completeness so the PO/Lead has full visibility. You can copy each story's section directly into the corresponding Azure DevOps comment.
+
+
+
+
+==========================================================================================================================
+
+
+That's already answered by the AC wording — 1072, 2118, 2215 → AgencyNumber. So Q2 (which customers use which field) is answered. Q2 can be dropped.
+
+For 2161 and 2164, the payee field is covered separately under AC3 (Michigan county prefix — Q4).
+
+Updated 6b question list, renumbered:
+
+---
+
+## US-126531 — 6b: ELD + Payee Layouts
+**Customers: 1072, 2118, 2215, 2161, 2164**
+
+---
+
+**Q1 — AC1: Layout Specification for All 5 Customers**
+Each of the five customers needs a row inserted into `[LASCommon].[dbo].[lac_BillingFileLayout]` with their own layout definition. Is there a layout specification document we should follow for the exact field widths and positions for each customer?
+
+---
+
+You're right — Q2 should present both column options and ask which one to use, rather than just confirming our assumption. Here's the corrected Q2:
+
+---
+
+**Q2 — AC2: AgencyNumber Source Column**
+AC2 confirms customers 1072, 2118, and 2215 use the `AgencyNumber` field. Two columns exist in `[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems]` that could map to this:
+
+- `VendorAgencyId VARCHAR(10)` — from source field `PRA_VENDOR_AGNC_ID`
+- `AgencyId VARCHAR(9)` — the agency identifier
+
+Which of these two columns should be used as the `AgencyNumber` for customers 1072, 2118, and 2215?
+
+
+---
+
+**Q3 — AC3: Michigan County Code for Customers 2161 and 2164 (Lead — Critical)**
+The original Elevate system derived a 2-character Michigan county prefix using an 83-branch CASE statement on the agency code. This logic does not exist in LERETA. In LERETA, county data lives in `[LASCommon].[dbo].[lac_CountyInfo]` (columns: `state_code`, `county_code`, `FIPS`, `IBM`).
+
+Should the 2-char Michigan county code come from:
+- `lac_CountyInfo.county_code` (derived from positions 3–5 of `AgencyId`), or
+- `lac_CountyInfo.IBM` (IBM mainframe county code), or
+- a separate mapping table?
+
+---
+
+**Q4 — AC4: Customer 1072 — Installment Sequence Filter**
+AC4 says only include rows where the installment sequence number is within 1–4. In LERETA this maps to `InstallmentInd VARCHAR(1)` in `[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems]`.
+
+Please confirm: should the stored procedure filter `WHERE InstallmentInd IN ('1','2','3','4')`?
+
+---
+
+**Q5 — AC5: Agency Name Source for Customers 2118 and 2215**
+The billing file for customers 2118 and 2215 includes an agency name field. The column `AgencyName VARCHAR(36)` exists directly on `[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems]`. Should the agency name come from this column, or does it need to be looked up from a separate agency/payee table using the agency code?
+
+---
+
+5 questions total. Confirm 6b is correct and I'll present 6c.
+
+
+
+=========================================================
+
+## US-126536 — 6d: Pattern 3 Layouts — Elevate Customers
+**Customers: 1061, 1103, 2130, 2162, 2200**
+
+---
+
+**Q1 — AC1: Layout Specification for All 5 Customers**
+Each of the five customers needs a row inserted into `[LASCommon].[dbo].[lac_BillingFileLayout]` with their own layout definition. Is there a layout specification document we should follow for the exact field widths and positions for each customer?
+
+---
+
+**Q2 — AC2: Spike Result — Architecture Decision (Lead — Critical)**
+AC2 is gated on a spike to determine whether the `vBillingFiles` view from Elevate's TAXProd database can be ported to LERETA. The view `vBillingFiles` does **not** exist in the LERETA database.
+
+Has the spike been completed? If yes, what was the outcome — should we create a shared view in LERETA, or should each customer have its own stored procedure querying `[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems]` directly?
+
+---
+
+**Q3 — AC2: Sequence Number Source Column**
+The billing file includes a Sequence Number field (derived from `RType` in Elevate). Two candidates exist in `[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems]`:
+
+- `LienSeq VARCHAR(4)` — lien sequence number
+- `CSP_TOI_REPT_TYPE VARCHAR(1)` — the RType column from Elevate
+
+Which column should be used as the Sequence Number?
+
+---
+
+**Q4 — AC2: Number of Installments Source Column**
+The billing file includes a Number of Installments field (derived from `AllowablePaymentOption` in Elevate). Two candidates exist in `[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems]`:
+
+- `CSP_NO_OF_INSTALLS VARCHAR(1)` — base installment count
+- `CSP_XAG_NO_OF_INSTALLS VARCHAR(1)` — agency-level override
+
+Which column should be used, or should the agency-level override take priority when populated?
+
+---
+
+**Q5 — AC2: AgencyNumber Source Column**
+Two columns in `[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems]` could map to the AgencyNumber field:
+
+- `VendorAgencyId VARCHAR(10)` — from source field `PRA_VENDOR_AGNC_ID`
+- `AgencyId VARCHAR(9)` — the agency identifier
+
+Which column should be used as the AgencyNumber?
+
+---
+
+**Q6 — AC4/AC5: Which Customers Use AgencyNumber vs PayeeCode?**
+The story says the payee field for some customers uses `AgencyNumber` and for others uses `PayeeCode`. Please confirm the correct field for each customer:
+
+| Customer | AgencyNumber (`VendorAgencyId`) | PayeeCode (`AgencyId`) |
+|---|---|---|
+| 1061 | | |
+| 1103 | | |
+| 2130 | | |
+| 2162 | | |
+| 2200 | | |
+
+---
+
+**Q7 — AC2: State/County Code — FIPS or IBM Column?**
+The billing file includes a 5-character state/county code derived from `[LASCommon].[dbo].[lac_CountyInfo]`. The table has two code columns:
+
+- `FIPS VARCHAR(5)` — official US government FIPS code
+- `IBM VARCHAR(5)` — IBM mainframe county code (can differ from FIPS)
+
+For customer 2200 (California), the sample file shows `06730` — county code 730 does **not** exist in standard US FIPS for California (FIPS runs 001–115), which suggests IBM codes may be in use.
+
+Which column should be used — `FIPS`, `IBM`, or IBM with FIPS as a fallback?
+
+---
+
+**Q8 — Customer 2130: Reference Field Source**
+In the sample file for customer 2130, the reference field contains a **property street address** (e.g., `515-EXPOSITIONBL`) rather than a bill number. Two columns exist in `[db_TaxAmtReports].[dbo].[tbl_cta_ReportedItems]` for the property address:
+
+- `SitusStreeNumber VARCHAR(9)` — street number
+- `SitusStreetName VARCHAR(30)` — street name
+
+Please confirm:
+1. Should the reference field for customer 2130 contain the property address rather than the bill number?
+2. Is the format always `{StreetNumber}-{StreetName}`?
+
+---
+
+**Q9 — Customer 1061: Blank Separator Rows in Sample File**
+The sample file for customer 1061 contains `\N` rows between groups of properties. These appear to be null-value markers from Elevate's export — they are not real data records.
+
+Should the LERETA output for customer 1061 be clean sequential rows with no blank separators, or does the receiving system expect blank lines between agency groups?
+
+---
+
+9 questions total. Confirm 6d is correct and I'll present 6e.

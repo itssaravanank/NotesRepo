@@ -1,0 +1,88 @@
+feature/US112267_TAR_BillingFile_Foundation
+
+feature/US118873_DelinquentLetters_Reports
+
+db_TaxAmtReports.[dbo].[tbl_cta_ReportedItems] Table We have columns like DoNotPayInd and Paid_Items - Which column we can consider for paid items - 
+
+Currenltly you added logic for DoNotPayInd
+
+
+ [dbo].[lac_BillingFileLayout] - Remove the  CONSTRAINT for CreatedDate and [UQ_lac_BillingFileLayout_CustId] UNIQUE NONCLUSTERED ([CustId])
+
+
+
+"correlationId": "D2C195FB-D393-47A8-8E56-566B08B32C4C",
+"sourceUniqueId": "DIR-1-151392",
+"taxLines": [
+{
+
+"year": "2026",
+"installment": "1",
+"amountDue": 1320.52,
+"penaltiesAndInterest": 35.89,
+"goodThruDate": "20260820",
+"goodThruDate2": "20260915",
+"balanceDue2": 1356.52,
+"paymentCode": "1",
+"specialCondition": "",
+"billNumber": "0101",
+"baseAmount": 1258.56,
+"asOfDate": "20260218",
+"leretaLiability": "",
+"notes": "RegressionDMU1",
+"paymentOptionIndicator": "A",
+"checkType": "Certified Funds or Cashiers' check",
+"eldDate": "20260820"
+}
+
+
+SqlException: The INSERT statement conflicted with the FOREIGN KEY constraint "FK_outs_Manual_Inbox_outs_OpenItems_UserTracking". The conflict occurred in database "LASOutsourcing", table "dbo.outs_OpenItems_UserTracking".
+
+
+Must Follow the "SQL_Implementation_Instructions.md".
+
+DataBase Name : LASOutsourcing
+SP Names: outs_COP_StateOverview_S, outs_COP_All_S, outs_COP_Complete_S_pagination
+
+These SP takes logn time to execute, needs to improve the performance
+
+Due to this "TDT Open Item System' Module Screens takes long time to load
+
+
+Affected Pages :
+
+OutSourcing/COP/OpenItemStatistic.aspx - Page Load - Dropdown Change, Count Click Grid
+OutSourcing/COP/OpenItemAll.aspx - Page Load - Its takes long time even for less count 
+OutSourcing/COP/OpenItemLoanDetails.aspx - Page Load
+OutSourcing/COP/OpenItemCompleted.aspx - When I click Completed Tab, this page open with no data - Its take very long time for page load even it has no recrds on page load
+
+Exec [dbo]. [outs_COP_All_S] 'ALL','ALL', '01t02945', 0, 'MN', 'ALL',1, 'ALL', null, null, 'ALL',null, null, 0
+Exec [dbo]. [outs_COP_All_S] '12180','ALL', '01t02945', 0, 'IL', 'ALL',1, 'ALL', null, null, 'ALL',null, null, 0
+
+OpenItemStatistic.aspx, OpenItemAll.aspx and OpenItemCompleted.aspx  → Highest priority
+OpenItemLoanDetails.aspx → Second priority
+
+The performance issue still exists
+
+Current Issues
+ OpenItemStatistic.aspx- When I click a count in the grid, the page takes a long time to load, even when the count is small.
+For example, if I click a count of 100 records, the results should load quickly, but it still takes a significant amount of time.
+
+When I click the **Completed** tab, the page initially loads only the **Search panel** without displaying the grid.
+
+However, even this initial load takes a significant amount of time.
+
+Since no grid data is being loaded at this stage, the **Search panel should appear immediately** without waiting for the underlying database queries or stored procedure execution.
+
+Please investigate why the initial page load is taking time even though the grid is not being loaded, and optimize the page so that the Search panel opens immediately.
+
+
+Now the Performance Improved for OpenItemStatistic.aspx, OpenItemAll.aspx Pages
+But - OpenItemCompleted.aspx Remain same, Need to improve the performance for this page all action
+
+
+
+
+
+
+
