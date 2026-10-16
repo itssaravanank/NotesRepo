@@ -1,0 +1,66 @@
+Here's a simplified version you can paste into Azure DevOps for PO/Lead review:
+
+---
+
+**Open Questions — US-112932 [Edit and Balance] Complete Button & History Queue**
+
+1.**How should the system know when a job is 15 days past completion?** 
+For regular jobs, there's an existing daily automated task (SQL job named **"LASTax TaxAmount History Queue"**) that runs once a day and checks which completed jobs are now old enough to move to History (5 days for one rule, 7 days for another).
+
+Should we create a **similar new job that runs daily**, checking for any Manual job marked "Complete" **15 or more days ago**, and automatically move it to the History tab? This would also require adding a small new field to track "has this Manual job moved to History yet."
+2. **What counts as "one job" for the Complete button?** Should clicking "Complete" mark one entire manual job (one agency, on one date) as done, or does it need to work at a more detailed level (e.g., per individual loan/bill)?
+3. **Are there any checks before allowing "Complete"?** For regular jobs, the user must enter check/payment details that match the total amount before they're allowed to click Complete. Should Manual jobs have similar requirements, or can the user click "Complete" right away with no pre-conditions?
+4. **Does this story also need to make Manual jobs visible on the Edit & Balance page first?** Right now, the Edit & Balance page doesn't show Manual jobs at all — there's nowhere to put the new Complete button until that's added. Should that work be included in this story, or handled separately beforehand?
+5. **Should completing a job send an email notification?** We found an existing email notification process related to Manual jobs (from a recent related story). Should completing a job trigger that notification, or is it unrelated?
+6. **Should the History "Export" button follow the same due/paid rules as the Summary grid, and only show jobs that are already fully moved to History?** This ties directly to Question 1 — a Manual job can only show up in this export once it's actually completed the 15-day move to History.
+7. **Does the History export need to support all the same filter options for Manual jobs (date, state, agency, etc.), or is it okay if Manual jobs just appear in the export without those extra filters working for them yet?**
+
+
+**Question 4 — Should displaying Manual jobs on the Edit & Balance page be its own separate story?**
+
+Right now, the Edit & Balance page doesn't show Manual jobs at all — only regular (Mass) jobs. Since this story's "Complete Job" button needs to appear on that page for a specific Manual job, we first need a place to put it.
+
+That page is one of the most complex pages in the system — it's built entirely around entering check numbers/amounts for regular jobs, which doesn't apply to Manual jobs at all. Adding Manual job support there is a substantial piece of work on its own, separate from just adding a Complete button.
+
+**Suggested split:**
+- **A separate story** would handle: making Manual jobs visible on the Edit & Balance page (the list of jobs, and their loan/lien details).
+- **This story (US-112932)** would then focus purely on: adding the Complete button, updating the status, and moving the job to History after 15 days — once Manual jobs are already visible on that page.
+
+**Question:** Should we split it this way (separate story first, then this one), or would you prefer everything — display and Complete button — bundled into this single story?
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+**Open Questions — US-112932 [Edit and Balance] Complete Button & History Queue**
+
+1. **How should the system know when a job is 15 days past completion?**
+For regular jobs, there's an existing daily automated task (SQL job named **"LASTax TaxAmount History Queue"**) that runs once a day and checks which completed jobs are now old enough to move to History.
+
+   Should we create a **similar new job that runs daily**, checking for any Manual job marked "Complete" **15 or more days ago**, and automatically move it to the History tab? Or can we add this new logic as an additional step in the same existing job?
+
+2. **Are there any checks before allowing "Complete"?** For regular jobs, the user must enter check/payment details that match the total amount before they're allowed to click Complete. Should Manual jobs have similar requirements, or can the user click "Complete" right away with no pre-conditions?
+
+3. **What counts as "one job" for the Complete button?** Since each Manual job is already tied to just one agency (unlike regular jobs, which can span multiple agencies under one job), our suggestion is that one click completes one entire Manual job in a single action — no need to complete it at a more detailed level (e.g., per individual loan/bill). Please confirm this is acceptable.
+
+4. **History Export behavior for Manual jobs:** The History page has two separate export options — a small download icon above the grid, and a separate **"Export Historical Tax Payment Summary"** button at the bottom of the page. For that one: should a Manual job only appear in the export **after** it has actually moved to History (not immediately when marked "Complete"), matching how regular jobs already behave? And should it also support the same filters (date, state, agency, status, etc.) that already work for regular jobs?
+
+
+
+**Need to make Manual jobs visible on the Edit & Balance page first:** Kindly give your suggestion on this.
+Right now, the Edit & Balance page doesn't show Manual jobs at all — only regular (Mass) jobs. Since this story's "Complete Job" button needs to appear on that page for a specific Manual job, we first need a place to put it.
+
+   Looks like we need a separate story to handle: making Manual jobs visible on the Edit & Balance page (the list of jobs, and their loan/lien details).
+
+   **This story (US-112932)** would then focus on:
+   - Handling the Complete button click and updating the status
+   - Moving the job to History after 15 days via a daily background job
+   - History Page Export functionality
+
+
+
+
+
+
+
+6. **Should completing a Manual job trigger an email notification?** There's an existing email notification process tied to Manual jobs (built in a recent related story). Should completing a job trigger that notification, or is it unrelated to this story?

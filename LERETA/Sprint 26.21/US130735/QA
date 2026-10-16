@@ -1,0 +1,51 @@
+-- TAR Edit and Balance - Create Payment Package Report - Loan Masked
+
+SELECT ID, LenderID, CustID, MaskLoanOnLetters, DateAdded
+FROM LASCommon.dbo.lac_customerProfile_lntoptions
+WHERE CustID = '75013'
+
+
+SELECT ID, LenderID, CustID, MaskLoanOnLetters, DateAdded
+FROM LASCommon.dbo.lac_customerProfile_lntoptions
+WHERE CustID = '42590'
+
+
+--------------------------------------------------------------------------
+DECLARE @CustID   VARCHAR(10) = '75013';
+DECLARE @RunName  VARCHAR(10) = 'NC261001';
+DECLARE @RunDate  DATE        = '2026-09-21';
+DECLARE @RunType  VARCHAR(10) = 'Manual';   -- 'Manual' or 'MF'
+DECLARE @AgencyID VARCHAR(25) = NULL;       -- NULL = all agencies on the job
+
+SELECT  s.CustID, s.RunName, s.RunDate, s.RunType, s.StateCode, s.AgencyID,
+        s.TotalTaxAmount, s.LoanCount, s.LienCount, s.ExceptionCount,
+        s.StatusDesc, s.isComplete, s.CompletedDate, s.ChecksRequired, s.isPayThruLereta
+FROM    dbo.Lat_TaxAmount_Summary s WITH (NOLOCK)
+WHERE   s.CustID   = @CustID
+  AND   s.RunName  = @RunName
+  AND   CAST(s.RunDate AS DATE) = @RunDate
+  AND   s.RunType  = @RunType
+  AND   (@AgencyID IS NULL OR s.AgencyID = @AgencyID)
+ORDER BY s.AgencyID;
+
+
+--------------------------------------------------------------------------
+DECLARE @CustID   VARCHAR(10) = '75013';
+DECLARE @RunName  VARCHAR(10) = 'NC261001';
+DECLARE @RunDate  DATE        = '2026-09-21';
+DECLARE @AgencyID VARCHAR(25) = NULL;       -- NULL = all agencies on the job
+
+SELECT  i.PRA_LOAN_ID, i.PRA_CONTRACT, i.PRA_AGENCY_ID, i.Pra_Instl_ind, i.Do_Not_Pay_Ind,
+        i.PRA_1st_Install_Amt, i.PRA_2nd_Install_Amt, i.PRA_3rd_Install_Amt, i.PRA_4th_Install_Amt,
+        r.AgencyName, r.LenderID, r.PayableName, r.AgencyPhone, r.HOA, r.Postal
+FROM    dbo.lat_Manual_TAR_Items_385 i WITH (NOLOCK)
+INNER JOIN dbo.lat_Manual_TAR_Reports_384 r WITH (NOLOCK)
+  ON  r.RunName    = i.PRA_RUN_NAME
+  AND CAST(r.RunDate AS DATE) = CAST(i.PRA_RUN_DATE AS DATE)
+  AND r.CustomerID = i.PRA_CUSTOMER_NO
+  AND r.AgencyID   = i.PRA_AGENCY_ID
+WHERE   i.pra_customer_no = @CustID
+  AND   i.pra_run_name    = @RunName
+  AND   CAST(i.pra_Run_Date AS DATE) = @RunDate
+  AND   (@AgencyID IS NULL OR i.PRA_AGENCY_ID = @AgencyID)
+ORDER BY i.PRA_AGENCY_ID, i.PRA_LOAN_ID;

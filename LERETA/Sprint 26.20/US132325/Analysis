@@ -1,0 +1,93 @@
+# US-132325 — [3c] Edit & Balance: Data Load for Manual TARs — High-Level Analysis
+
+## What
+Make Manual TAR job data correctly appear on the Edit & Balance screens — the Job Summary
+header, the Agency list, and the per-Agency detail counts — under both Current and History
+menus, by adjusting `SP_TaxAmountEditBalance` and `SP_TaxAmountEditBalanceDetails` to (a) stop
+excluding Manual rows via an `INNER JOIN` to the Mass-only `lat_RPT_TCS384` table, and (b) add a
+small number of targeted fallbacks to `lat_Manual_TAR_Reports_384`/`lat_Manual_TAR_Items_385`
+for the handful of fields that genuinely have no equivalent on the shared `lat_TaxAmount_Summary`
+row.
+
+## Why
+A user can already click through to the Edit/Balance tab for a Manual job today — the
+tab-strip is shared, and `TaxAmtEditBalance` falls back to session-carried job context. But
+the page still renders empty/incomplete for Manual jobs, because these two SPs still `INNER
+JOIN`/hard-subquery against Mass-only tables in several places.
+
+## What We're Working With
+- **`Lat_TaxAmount_Summary`** — the shared tracking row for both Mass (`RunType='MF'`) and
+  Manual (`RunType='Manual'`) jobs. Already has everything Data Table #4 ("Current Counts &
+  Total") needs, once the SP's join to `lat_RPT_TCS384` is loosened.
+- **`lat_RPT_TCS384`** (Mass-only) vs **`lat_Manual_TAR_Reports_384`** (Manual-only) — these
+  remain SEPARATE header tables; a Manual RunName has no row in the former. Wherever
+  `SP_TaxAmountEditBalance`/`Details` currently pull TaxYear/Installment/dates/BillType/etc. from
+  `lat_RPT_TCS384`, a Manual-aware fallback to `lat_Manual_TAR_Reports_384` is needed.
+- **`lat_rpt_tcs385_365`** (Mass items) vs **`lat_Manual_TAR_Items_385`** (Manual items) — still
+  separate; the Distinct-Agency query and the Do-Not-Pay/Exception/HandleManual subtotal
+  calculations in `SP_TaxAmountEditBalanceDetails` still need a Manual-aware source swap.
+
+## Current Call Chain (unchanged end-to-end — no signature changes anywhere)
+```
+LeretanetCore.Web (TaxAmountReportsController.TaxAmtEditBalance)
+  → TaxAmtEditBalanceService.GetRunJobSummaryAsync → SP_TaxAmountEditBalance (LASTax)
+  → TaxAmtEditBalanceService.GetTaxAmountDetailAsync → SP_TaxAmountEditBalanceDetails (LASTax)
+```
+No controller/service/view-model change is anticipated — this is a SQL-only story.
+
+## Technical Approach
+- **`SP_TaxAmountEditBalanceDetails` Data Table #4 ("Current Counts & Total"):** change
+  `INNER JOIN dbo.lat_RPT_TCS384 lts384` to a `LEFT JOIN`. Once loosened, the existing
+  ISNULL-guarded formulas (`ISNULL(lts384.SpecialInstrInd,'N')`, etc.) already degrade
+  gracefully for Manual rows — no separate Manual branch needed for this result set beyond the
+  join-type change.
+- **`@DoNotPayCnt`/`@ExceptionAmt`/`@HMAmt`/`@ItemsPerCheck`** (computed earlier in the same SP
+  from `lat_rpt_tcs385_365` / `LAC_AGENCYPROFILE LEFT JOIN lat_RPT_TCS384`): add a Manual-aware
+  fallback — when the row being processed is a Manual job (`lts.RunType = 'Manual'`), source
+  these values from `lat_Manual_TAR_Items_385`/`lat_Manual_TAR_Reports_384` instead.
+- **`SP_TaxAmountEditBalance` "Distinct Agency" query (Query 1):** currently sources only from
+  `lat_rpt_tcs385_365`. Since `Lat_TaxAmount_Summary` already carries `AgencyID` for a Manual
+  row directly, the simplest fix is a fallback: when no `lat_rpt_tcs385_365` rows exist for the
+  RunName, return the single Agency from `lts`/`lac_AgencyProfile` instead — naturally matches
+  Manual jobs' "always exactly one Agency" shape.
+- **`SP_TaxAmountEditBalance` Query 2 / `SP_TaxAmountEditBalanceDetails` Data Table #8 (Job
+  Summary):** the scalar subqueries hard-coded against `lat_RPT_TCS384` for TaxYear/Installment/
+  DueDate/LoadedDate/ReturnDate return NULL for Manual RunNames — add a `COALESCE`/fallback
+  subquery against `lat_Manual_TAR_Reports_384` for these specific fields only.
+- **Current vs History:** `@History` is unused/vestigial in both SPs today — the Current/
+  History distinction is decided upstream by which grid link was clicked, not re-filtered on
+  this page. No new filtering logic is needed here for Manual jobs either.
+
+## Related Finding
+`sp_TaxAmount_Reports_Summary`'s `SupInd` output column (used by the Summary grid's Run Type
+filter, shipped in US-112929) only computes `'Supp'`/`'Initial'` from `JobSupInd` — it does not
+check the `RunType` column. Since Manual jobs' `JobSupInd` is hardcoded `'N'` at load time,
+every Manual job today shows as "Initial" on the grid, which also breaks the Run Type filter/
+alert/routing logic already merged into `TaxAmountReportsController.cs`. This sits upstream of
+this story (it affects the Summary grid, not the Edit & Balance page), but is worth resolving
+since it affects reliable Manual-job detection anywhere `SupInd` is used instead of `RunType`.
+
+## Key Files/Components Touched
+| Layer | File | Change |
+|---|---|---|
+| SQL | `SP_TaxAmountEditBalance.sql` (LASTax) | Loosen/extend Distinct-Agency + Job-Summary queries with Manual fallbacks |
+| SQL | `SP_TaxAmountEditBalanceDetails.sql` (LASTax) | `INNER JOIN` → `LEFT JOIN` on TCS384 in Data Table #4; Manual-aware fallback for DoNotPay/Exception/HM/ItemsPerCheck and Job-Summary date fields |
+
+No C#/Razor/JS changes anticipated.
+
+## What Changes
+- The Edit & Balance page's Job Summary header, Agency dropdown, and per-Agency detail counts
+  (Current Counts, Total Amount, Checks Required, Remit Type, Pay-Thru-LERETA config, Stop
+  Count) populate correctly when reached via a Manual job's `RunName`, under both Current and
+  History menus.
+- Comments and Check Data sections remain empty for Manual jobs — this is expected, not a bug
+  (no Transmittal comments and no Complete flow yet).
+
+## What Stays the Same
+- Mass-job behavior on this page is completely unchanged.
+- Save/Complete/Reset and Export/printed-report flows remain out of scope for this story.
+
+## Expected Outcome
+A user who navigates to the Edit & Balance tab for a Manual TAR job sees accurate job summary
+and agency detail data instead of a blank/incomplete page, under both Current and History
+menus — laying the groundwork for US-112932's Complete button to have something to operate on.

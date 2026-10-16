@@ -1,0 +1,108 @@
+# US-112932 — [3a] Edit & Balance: Complete Button & History Queue — High-Level Analysis
+
+## What Is Already True in the Database
+Manual TAR jobs get a real row in `lat_TaxAmount_Summary` (`RunType='Manual'`, populated by
+`sp_TaxAmt_Manual_Summary_iu`) — the exact same shared tracking table Mass jobs use, with the
+exact same `isComplete`/`isHistory`/`CompletedDate`/`CompletedBy`/`isPayThruLereta`/
+`ChecksRequired`/`RemitType`/`StatusDesc` columns already in place. This means:
+- **No new column is needed** — `lat_TaxAmount_Summary.isHistory` already exists, shared with
+  Mass jobs.
+- **`Usp_Complete_EditBalanceJob` (the existing Mass-job Complete SP) may be largely reusable**
+  for Manual jobs, rather than needing a brand-new SP from scratch — it already operates
+  generically on `lat_TaxAmount_Summary`/`lat_TaxAmount_CheckData` by RunName/RunDate/CustID/
+  AgencyID, with no Mass-only filter. What it still needs first is *some* check-data entry
+  mechanism for Manual jobs (see "Open Dependency" below).
+- **The existing 5-day History-queue job (`job_TaxAmount_MoveToHistoryQueue_u`) is NOT
+  automatically safe for Manual rows** — it has no `RunType` filter, so once a Manual job's
+  `isComplete` is set to 1, this job would flip it to History after 5 days, not the confirmed
+  15-day window. This needs a small guard added (exclude `RunType = 'Manual'`).
+- **The ELD-based History-queue job (`job_TaxAmount_MoveToHistoryQueueByELD_u`) is naturally
+  safe** — it `INNER JOIN`s `lat_RPT_TCS384`, which Manual jobs never have a row in, so it can
+  never match a Manual row. No change needed there.
+- **The History Export SP (`sp_TaxAmount_Reports_Summary_Export_Excel`) already includes Manual
+  rows generically** (TranType-branched subqueries, HAVING clause admits Manual rows) — most of
+  AC5/AC6 is already covered. One gap remains: its `@RunType` filter parameter doesn't recognize
+  `'Manual'` (only matches `'Supp'`/`'Initial'` via `JobSupInd`), so filtering the export by Run
+  Type = Manual silently returns nothing.
+- **A related bug was found**, not part of this story but relevant: the TAR Summary grid's own
+  `SupInd` column (`sp_TaxAmount_Reports_Summary`) still mislabels every Manual job as "Initial"
+  — see "Related Finding" below.
+
+## What
+Add a working "Complete" action for Manual TAR jobs on the Edit & Balance page, and ensure
+completed Manual jobs move into History after 15 days (not the 5/10-day windows Mass jobs use) —
+achieved primarily by reusing existing Mass-job mechanisms (already-shared table columns,
+likely the same Complete SP) plus small, targeted guards/additions rather than parallel
+Manual-specific plumbing. Also fix the History Export's Run-Type filter so it recognizes Manual.
+
+## Why
+Manual jobs share `lat_TaxAmount_Summary` with Mass jobs now, but nothing yet sets
+`isComplete`/`CompletedDate` for them (no Complete action exists), and nothing yet enforces the
+15-day (vs 5/10-day) History window specifically for Manual rows.
+
+## What We're Working With
+- **`Usp_Complete_EditBalanceJob`** — generic, keyed by RunName/RunDate/CustID/AgencyID; not
+  Mass-specific by design. Candidate for direct reuse, pending the check-data-entry dependency.
+- **`job_TaxAmount_MoveToHistoryQueue_u`** (5-day, no TCS384 join) — needs a `RunType != 'Manual'`
+  guard added so it stops short of touching Manual rows.
+- **`job_TaxAmount_MoveToHistoryQueueByELD_u`** (10-day, INNER JOINs TCS384) — inherently safe,
+  no change needed.
+- **New 15-day step/SP** — still needed, added to the existing "LASTax TaxAmount History Queue"
+  SQL Agent job, filtered to `RunType = 'Manual'` (per confirmed answer).
+- **`sp_TaxAmount_Reports_Summary_Export_Excel`** — mostly already Manual-aware; needs a small
+  fix to its `@RunType` dynamic-SQL filter branch only.
+
+## Technical Approach
+- **Complete button — one click per Manual job:** unchanged conclusion — a Manual `RunName`
+  always maps to exactly one Agency, so Complete operates on the whole job in one action.
+- **Complete validation:** same rule as Mass jobs — entered check amount must match total due.
+  **This still requires a check-amount entry mechanism for Manual jobs that no story has yet
+  defined** — unchanged, still the single biggest open dependency (see Section 18 of the
+  Detailed doc).
+- **Status wording:** use `'Edit/Balance Completed'` (with slash) — unchanged, matches
+  `StatusDesc`'s existing vocabulary on the now-shared `lat_TaxAmount_Summary` table.
+- **History transition:** no new column needed (unlike the original plan) — add a small guard
+  to `job_TaxAmount_MoveToHistoryQueue_u` (exclude `RunType='Manual'`), and add one new step/SP
+  (15-day, `RunType='Manual'` filter) to the existing "LASTax TaxAmount History Queue" job.
+- **Email notification:** unchanged — completing a Manual job does NOT trigger
+  `job_ManualTarJob_EMail` (confirmed).
+- **History Export:** most of the work is already done by the other team's PR; this story only
+  needs to add a `RunType = 'Manual'` branch to the `@RunType` filter parameter's dynamic-SQL
+  logic in `sp_TaxAmount_Reports_Summary_Export_Excel`.
+
+## Related Finding (flagged, needs your triage — shared with US-132325)
+`sp_TaxAmount_Reports_Summary`'s `SupInd` output column was never updated to recognize the new
+`RunType = 'Manual'` column — Manual jobs currently display as "Initial" on the TAR Summary grid,
+silently breaking the already-shipped Run Type filter/alert (US-112929). Not part of this
+story's original file list, but worth deciding who fixes it, since it may affect how reliably
+this story's own Complete-button UI can detect "this is a Manual job" if it ever keys off
+`SupInd` instead of `RunType` directly.
+
+## Key Files/Components Touched
+| Layer | File | Change |
+|---|---|---|
+| SQL | `job_TaxAmount_MoveToHistoryQueue_u.sql` | Add `RunType != 'Manual'` guard |
+| SQL | New SP/step (name TBD) | 15-day Manual-only History transition, added to existing "LASTax TaxAmount History Queue" job |
+| SQL | `sp_TaxAmount_Reports_Summary_Export_Excel.sql` | Fix `@RunType` filter branch to recognize 'Manual' |
+| SQL | `Usp_Complete_EditBalanceJob` (candidate reuse, TBD) | Verify/extend for Manual jobs once check-data entry mechanism is defined |
+| Web | Edit & Balance Complete button/flow | New Manual-specific action (exact scope TBD — depends on resolving the check-amount entry gap) |
+| DBA | "LASTax TaxAmount History Queue" SQL Agent job | Add new step calling the new 15-day SP |
+
+## What Changes
+- A Manual job on the Edit & Balance page can be marked "Complete" once its entered check amount
+  matches the total due (mechanism for entering that amount still TBD).
+- 15 days after completion, a Manual job automatically moves to History via a new step in the
+  existing daily History Queue job, without disturbing the existing 5/10-day Mass-job jobs.
+- The History Export's Run Type filter correctly includes Manual jobs when filtered.
+
+## What Stays the Same
+- Mass-job Complete/History-queue behavior is completely unchanged.
+- No Mainframe/payment-file integration is added for Manual jobs.
+- Completing a Manual job does not send any email notification.
+
+## Expected Outcome
+Manual TAR jobs gain a full Current → Completed → History lifecycle on the Edit & Balance page,
+achieved with a small SQL footprint (no new column, likely reuse of the existing Complete SP),
+while the check-amount entry mechanism for Manual jobs remains an explicitly flagged, still-open
+dependency to resolve before implementation.
+

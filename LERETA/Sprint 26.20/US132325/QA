@@ -1,0 +1,37 @@
+Note: Remit Type (Check/Wire) on Manual TAR jobs — Edit & Balance Details page
+
+The "Select Remit Type" dropdown always has both Check and Wire options in it. For Manual TAR jobs, the dropdown will always appear greyed out / locked on "Check" — this is expected behavior today, not a bug in the current story.
+Reason: whether the dropdown can be changed at all depends on a flag tied to the agency (whether the agency is set up for wire payments). For every Manual TAR job, that flag is currently always "No" — it's never set to "Yes" for Manual jobs, only for regular (Mass) jobs.
+Because of that, Manual jobs can never be switched to Wire today. This isn't caused by anything being fixed/changed in this story (US-132325) — it comes from the separate process that creates Manual TAR jobs in the first place, which never sets up the wire flag.
+What to test: Confirm the dropdown is locked/disabled and shows "Check" for Manual jobs — that is the correct, expected result. It should not be logged as a defect under this story. If Wire support for Manual jobs is needed, it should be raised as a separate item against the Manual TAR job-creation process, not against this story's changes.
+
+
+===========================================================================================================================================================================
+
+DECLARE @RunName VARCHAR(10) = 'MN262008';   -- <-- set RunName
+DECLARE @RunDate DATE       = '2026-09-21'; -- <-- set RunDate (date only is fine)
+
+SELECT
+    s.CustID,
+    s.RunName,
+    s.RunDate,
+    s.AgencyID,
+    s.RunType,
+    s.RemitType                    AS Summary_RemitType,
+    m.SpecialInstrInd               AS ManualHeader_SpecialInstrInd,
+    m.RemitType                     AS ManualHeader_RemitType
+FROM Lat_TaxAmount_Summary (NOLOCK) s
+LEFT JOIN lat_Manual_TAR_Reports_384 (NOLOCK) m
+       ON m.RunName     = s.RunName
+      AND m.CustomerID  = s.CustID
+      AND m.AgencyID    = s.AgencyID
+      AND CAST(m.RunDate AS DATE) = CAST(s.RunDate AS DATE)
+WHERE s.RunName = @RunName
+  AND CAST(s.RunDate AS DATE) = @RunDate;
+
+
+How to read the result:
+
+ManualHeader_SpecialInstrInd = 'Y' → the Remit Type dropdown will be enabled/editable for that agency on that job.
+ManualHeader_SpecialInstrInd = 'N' (or no matching row) → the dropdown will be locked on Check.
+Summary_RemitType / ManualHeader_RemitType show what's actually saved — for Manual jobs today, expect 'Check' (or blank), never 'Wire'.

@@ -1,0 +1,325 @@
+# US-129257 — EPQ Follow-Up Tab Bulk Cleanup (One-Time Script) — Detailed Analysis
+
+> Module: Business Tools → Exception Processing Queue → Follow-Up tab. One-time administrative
+> data-fix script against `LASTax`. No application code (DAL/BLL/UI/Dispatcher) is changed —
+> this script is run directly against the database, outside the Remoting/API path.
+
+---
+
+## 1. Overview
+
+The Follow-Up tab (`ExcpetionQueueFollowup.aspx` → `USP_ExceptionQueue_FollowUp_Sel`) shows a task
+whenever, for its latest `SeqNo` per `(ExceptionID, SystemCode)`: `tbl_ExceptionQueue_UserTracking
+.isFollowUp = 1` and the matching `tbl_ExceptionQueue_FollowUp_Notes` row has `isFollowUp = 1`
+and a real (non-blank) `FollowUpDate`. Over 7,500 such rows have accumulated, some since 2020.
+
+The normal "Complete" action (`usp_ExceptionQueue_CompletedItems_Upd`, used by the loan-detail
+pages) does more than close a task — depending on `SystemCode`/`PaymentStatus` it also flips
+`tbl_ExceptionQueue` indicator columns (`DLQResearchInd`/`DLQMonthlyUpdatesInd`/
+`TaxSaleResearchInd`) and, for DIR items with a delinquent payment status, **inserts a new
+`tbl_ExceptionQueue_Tax_Info` row that pushes the item into the DMU queue**. Looping that SP for
+the whole backlog risks creating new/duplicate items — exactly what this story's acceptance
+criteria (#5) prohibits, and very likely how the duplicate backlog built up in the first place.
+
+**Decision (confirmed with PO):** build a new, narrowly-scoped one-time script that only touches
+`tbl_ExceptionQueue_UserTracking`, `tbl_ExceptionQueue_FollowUp_Notes`, and
+`tbl_ExceptionQueue_History` — archiving before every update, matching the existing convention in
+these stored procedures — and explicitly leaves `tbl_ExceptionQueue` and
+`tbl_ExceptionQueue_Tax_Info` untouched.
+
+Two sub-populations exist within "everything currently on the Follow-Up tab":
+- **Genuinely open** (`isComplete` = 0/NULL): get the full completion stamp.
+- **Already completed, stale flag only** (`isComplete` already = 1, `isFollowUp` never cleared):
+  only the flag is cleared; original `CompletedDate`/`TaggedUser`/`UpdatedBy` are preserved.
+
+Both sub-populations still receive the standardized note and history entry, so every task this
+script touches is traceable back to this cleanup.
+
+---
+
+## 2. Affected Components (exact file paths)
+
+**SQL (new, this ticket only — no existing stored procedure is modified)**
+- `Documents/LERETANet/Scripts/US-129257/01_US129257_EPQFollowUp_BulkCleanup.sql` — the one-time
+  cleanup script (see Section 3)
+- `Documents/LERETANet/Scripts/US-129257/02_US129257_TEST.sql` — verification script (Section 16)
+
+**Not required**
+- No `.sqlproj` repo stored-procedure file — this is a single-use administrative script, not a
+  reusable object, consistent with "one time script" in the story title.
+- No C#/application changes of any kind (no DAL, BLL, dispatcher, ASPX, or config changes) — the
+  script runs directly against `LASTax`, outside the Remoting/API path entirely.
+- No `BusinessEntities` XSD changes — no new columns are introduced or returned anywhere.
+
+**Not modified (confirmed out of scope / explicitly protected)**
+- `tbl_ExceptionQueue` (`DLQResearchInd`, `DLQMonthlyUpdatesInd`, `TaxSaleResearchInd`,
+  `SourceofTaxSaleInformation`, `IsWorked`, etc.) — untouched, to avoid re-triggering any
+  downstream queue/report logic.
+- `tbl_ExceptionQueue_Tax_Info` — untouched, no new rows inserted (this is the table whose
+  insertion is what pushes an item into the DMU queue under the normal Complete action).
+- `usp_ExceptionQueue_CompletedItems_Upd` and every other existing stored procedure — none are
+  modified; this script is fully standalone.
+
+---
+
+## 3. Database Changes
+
+**Database:** `LASTax`. No schema changes — data-only script against existing tables.
+
+### Identification (population snapshot)
+Mirrors `USP_ExceptionQueue_FollowUp_Sel`'s own eligibility logic exactly, run with no
+Lender/Agency/Customer/User filter (i.e., system-wide — everything currently on the Follow-Up
+tab for any user), captured once into a temp table so every later step operates against a
+stable snapshot rather than a criteria set that shifts as rows are updated mid-script:
+
+```sql
+SELECT
+    UT.ID            AS UserTrackingID,
+    UT.ExceptionID,
+    UT.SystemCode,
+    UT.SeqNo,
+    UT.TaggedUser    AS OldTaggedUser,
+    CAST(CASE WHEN ISNULL(UT.isComplete,0) = 1 THEN 1 ELSE 0 END AS BIT) AS WasAlreadyComplete
+INTO #EligibleFollowUp
+FROM (
+    SELECT MAX(UT2.SeqNo) AS SeqNo, EQ2.ExceptionID, UT2.SystemCode
+    FROM [LASTax].[dbo].[tbl_ExceptionQueue_FollowUp_Notes] FN2 WITH (NOLOCK)
+    JOIN [LASTax].[dbo].[tbl_ExceptionQueue] EQ2 WITH (NOLOCK) ON EQ2.ExceptionID = FN2.ExceptionID
+    JOIN [LASTax].[dbo].[tbl_ExceptionQueue_UserTracking] UT2 WITH (NOLOCK)
+        ON UT2.ExceptionID = EQ2.ExceptionID AND UT2.SystemCode = FN2.SystemCode
+           AND ISNULL(FN2.SeqNo,0) = ISNULL(UT2.SeqNo,0)
+    WHERE ISNULL(UT2.isFollowUp,0) = 1 AND FN2.FollowUpDate <> '' AND ISNULL(FN2.isFollowUp,0) = 1
+    GROUP BY EQ2.ExceptionID, UT2.SystemCode
+) Eligible
+JOIN [LASTax].[dbo].[tbl_ExceptionQueue_UserTracking] UT WITH (NOLOCK)
+    ON UT.ExceptionID = Eligible.ExceptionID AND UT.SystemCode = Eligible.SystemCode
+       AND ISNULL(UT.SeqNo,0) = ISNULL(Eligible.SeqNo,0);
+```
+
+### Full proposed script
+
+```sql
+USE [LASTax]
+GO
+
+SET NOCOUNT ON;
+
+DECLARE @ClosedBy  VARCHAR(20)  = 'EPQClean-129257';  -- pending final label pick, see Open Q1
+DECLARE @Now       DATETIME     = GETDATE();
+DECLARE @NoteText  VARCHAR(250) = 'Closed as part of the Follow-Up duplicates cleanup.';
+
+BEGIN TRY
+    BEGIN TRANSACTION EPQFollowUpBulkCleanup;
+
+    -- (identification query from above populates #EligibleFollowUp here)
+
+    -- Archive UserTracking rows about to change
+    INSERT INTO [dbo].[tbl_ExceptionQueue_UserTracking_Archive]
+        ([ExceptionID],[SeqNo],[isComplete],[isFollowUp],[TaggedUser],[CompletedDate],[FollowUpDate],
+         [InsertedDate],[InsertedBy],[UpdatedDate],[UpdatedBy],[SystemCode],[isPendingQC],[ID],[ArchivedDate],[ArchivedBy])
+    SELECT UT.[ExceptionID],UT.[SeqNo],UT.[isComplete],UT.[isFollowUp],UT.[TaggedUser],UT.[CompletedDate],UT.[FollowUpDate],
+           UT.[InsertedDate],UT.[InsertedBy],UT.[UpdatedDate],UT.[UpdatedBy],UT.[SystemCode],UT.[isPendingQC],UT.[ID],@Now,@ClosedBy
+    FROM [dbo].[tbl_ExceptionQueue_UserTracking] UT
+    JOIN #EligibleFollowUp E ON E.UserTrackingID = UT.ID;
+
+    -- Genuinely-open rows -> full completion stamp
+    UPDATE UT
+    SET UT.isComplete = 1, UT.isFollowUp = 0, UT.isPendingQC = 0,
+        UT.CompletedDate = @Now, UT.TaggedUser = @ClosedBy, UT.UpdatedBy = @ClosedBy, UT.UpdatedDate = @Now
+    FROM [dbo].[tbl_ExceptionQueue_UserTracking] UT
+    JOIN #EligibleFollowUp E ON E.UserTrackingID = UT.ID
+    WHERE E.WasAlreadyComplete = 0;
+
+    -- Already-complete rows -> clear flags only, preserve original completion info
+    UPDATE UT
+    SET UT.isFollowUp = 0, UT.isPendingQC = 0, UT.UpdatedDate = @Now
+    FROM [dbo].[tbl_ExceptionQueue_UserTracking] UT
+    JOIN #EligibleFollowUp E ON E.UserTrackingID = UT.ID
+    WHERE E.WasAlreadyComplete = 1;
+
+    -- Archive the FollowUp_Notes rows about to change
+    INSERT INTO [dbo].[tbl_ExceptionQueue_FollowUp_Notes_Archive]
+        ([LoanNotesID],[ExceptionID],[LoanID],[CustID],[LenderID],[AgencyID],[TaxID],[LienSEQ],[NoteEnteredDate],
+         [UserID],[NoteText],[isFollowUp],[FollowUpDate],[NoteUpdatedDate],[UpdatedBy],[SystemCode],[ArchivedDate],[ArchivedBy],SeqNo)
+    SELECT FN.[LoanNotesID],FN.[ExceptionID],FN.[LoanID],FN.[CustID],FN.[LenderID],FN.[AgencyID],FN.[TaxID],FN.[LienSEQ],FN.[NoteEnteredDate],
+           FN.[UserID],FN.[NoteText],FN.[isFollowUp],FN.[FollowUpDate],FN.[NoteUpdatedDate],FN.[UpdatedBy],FN.[SystemCode],@Now,@ClosedBy,FN.SeqNo
+    FROM [dbo].[tbl_ExceptionQueue_FollowUp_Notes] FN
+    JOIN #EligibleFollowUp E ON E.ExceptionID = FN.ExceptionID AND E.SystemCode = FN.SystemCode AND ISNULL(E.SeqNo,0) = ISNULL(FN.SeqNo,0)
+    WHERE ISNULL(FN.isFollowUp,0) = 1 AND FN.FollowUpDate <> '';
+
+    -- Clear the active flag on those existing note rows (original NoteText untouched)
+    UPDATE FN
+    SET FN.isFollowUp = 0, FN.NoteUpdatedDate = @Now, FN.UpdatedBy = @ClosedBy
+    FROM [dbo].[tbl_ExceptionQueue_FollowUp_Notes] FN
+    JOIN #EligibleFollowUp E ON E.ExceptionID = FN.ExceptionID AND E.SystemCode = FN.SystemCode AND ISNULL(E.SeqNo,0) = ISNULL(FN.SeqNo,0)
+    WHERE ISNULL(FN.isFollowUp,0) = 1 AND FN.FollowUpDate <> '';
+
+    -- Insert the standardized closure note (one new row per task)
+    INSERT INTO [dbo].[tbl_ExceptionQueue_FollowUp_Notes]
+        ([ExceptionID],[LoanID],[CustID],[LenderID],[AgencyID],[TaxID],[LienSEQ],[NoteEnteredDate],
+         [UserID],[NoteText],[isFollowUp],[FollowUpDate],[UpdatedBy],[SystemCode],[SeqNo])
+    SELECT EQ.[ExceptionID],EQ.[LoanID],EQ.[CustID],EQ.[LenderID],EQ.[AgencyID],EQ.[TaxID],EQ.[LienSEQ],@Now,
+           @ClosedBy,@NoteText,0,NULL,@ClosedBy,E.SystemCode,E.SeqNo
+    FROM #EligibleFollowUp E
+    JOIN [dbo].[tbl_ExceptionQueue] EQ ON EQ.ExceptionID = E.ExceptionID;
+
+    -- Audit trail entry per task
+    INSERT INTO [dbo].[tbl_ExceptionQueue_History]
+        ([ExceptionID],[CustID],[LenderID],[LoanID],[AgencyID],[TaxID],[LienSEQ],[OldValue],[NewValue],[Comments],[InsertedDate],[InsertedBy],SystemCode,SeqNo)
+    SELECT EQ.[ExceptionID],EQ.[CustID],EQ.[LenderID],EQ.[LoanID],EQ.[AgencyID],EQ.[TaxID],EQ.[LienSEQ],
+           E.OldTaggedUser, @ClosedBy, @NoteText, @Now, @ClosedBy, E.SystemCode, E.SeqNo
+    FROM #EligibleFollowUp E
+    JOIN [dbo].[tbl_ExceptionQueue] EQ ON EQ.ExceptionID = E.ExceptionID;
+
+    SELECT COUNT(*) AS TotalProcessed,
+           SUM(CASE WHEN WasAlreadyComplete = 0 THEN 1 ELSE 0 END) AS NewlyClosed,
+           SUM(CASE WHEN WasAlreadyComplete = 1 THEN 1 ELSE 0 END) AS FlagOnlyCleared
+    FROM #EligibleFollowUp;
+
+    COMMIT TRANSACTION EPQFollowUpBulkCleanup;
+    PRINT 'EPQ Follow-Up bulk cleanup completed successfully.';
+END TRY
+BEGIN CATCH
+    IF XACT_STATE() <> 0 ROLLBACK TRANSACTION EPQFollowUpBulkCleanup;
+    THROW;
+END CATCH
+```
+
+---
+
+## 4. DAL Changes
+
+N/A — this script runs directly against the database. No `ExceptionQueueDAL` (or any other DAL)
+method is added, modified, or called.
+
+---
+
+## 5. BLL Changes
+
+N/A — no `ExceptionQueueBLL` method is added or modified.
+
+---
+
+## 6. Dispatcher Changes
+
+N/A — this script bypasses the Remoting dispatcher (`Host/Tax.cs`) entirely; it is executed
+directly against `LASTax`, not through `CallMethod`.
+
+---
+
+## 7. UI Changes
+
+N/A — no ASPX page, code-behind, or control changes. The existing Follow-Up, Completed, Notes,
+and Data History screens are unchanged; they will simply reflect the updated data once the
+script has run.
+
+---
+
+## 8. Validation Rules
+
+- The eligible population is captured once into `#EligibleFollowUp` before any write occurs, so
+  every later step (archive, update, note insert, history insert) acts against a fixed, consistent
+  snapshot rather than criteria that could shift as rows are updated mid-script.
+- Every write statement joins back to `#EligibleFollowUp` by `UserTrackingID` (or
+  `ExceptionID`/`SystemCode`/`SeqNo`) — nothing outside the identified population is touched.
+
+---
+
+## 9. Error Handling
+
+The whole script runs inside a single transaction (`TRY`/`CATCH`, matching the pattern already
+used in `usp_ExceptionQueue_Save_FollowUps`). Any failure on any step rolls back everything —
+either all identified tasks are closed and noted, or none are. The script is not partially
+applied.
+
+---
+
+## 10. Configuration Changes
+
+N/A — no `Web.config`/`App.config` keys are added or changed.
+
+---
+
+## 11. SQL Script Delivery
+
+| File | Purpose |
+|---|---|
+| `Documents/LERETANet/Scripts/US-129257/01_US129257_EPQFollowUp_BulkCleanup.sql` | The one-time cleanup script (Section 3) |
+| `Documents/LERETANet/Scripts/US-129257/02_US129257_TEST.sql` | Pre-run discovery queries, post-run verification, and `[SIMULATE]` rollback check on a small sample |
+
+No rollback/pre-deployment snapshot script is produced, per standard convention — the script's
+own archive-before-update steps serve as the recovery trail if ever needed.
+
+---
+
+## 12. BusinessEntities / DataSet Changes
+
+N/A — no new columns are introduced or returned by any stored procedure; no typed `DataSet` XSD
+changes are required.
+
+---
+
+## 13. Edge Cases
+
+| Case | Handling |
+|---|---|
+| A task's tracking row has `isPendingQC = 1` at run time (not observed in current data, but schema allows it) | Script clears it to 0 along with `isFollowUp`, matching the same behavior as the standard Complete action. Flagging for awareness since it's a judgment call if any such row exists in Production. |
+| Multiple `tbl_ExceptionQueue_FollowUp_Notes` rows share the same `(ExceptionID, SystemCode, SeqNo)` | All matching note rows are archived and flag-cleared; only **one** new standardized closure note is inserted per task (not one per existing note row). |
+| An `ExceptionID` with no matching `tbl_ExceptionQueue` row | The note/history inserts (which join to `tbl_ExceptionQueue` for Loan/Lender/Agency/Tax details) would simply skip such a row. Not expected — every eligible row was confirmed to have a matching parent record during analysis. |
+
+---
+
+## 14. Assumptions
+
+- "Follow-Up tab population" = exactly what `USP_ExceptionQueue_FollowUp_Sel`'s own filter logic
+  returns, applied with no Lender/Agency/Customer/User restriction (i.e., system-wide).
+- Scope is confirmed as **all** such items in the Production `LASTax` database at the time the
+  script is run there (per PO confirmation).
+- This is a true one-time script, run directly by a developer/DBA against Production — it is not
+  wrapped in a reusable stored procedure or scheduled job.
+- The short "closed by" label (`EPQClean-129257` or a PO-specified alternative, ≤ 20 characters)
+  is acceptable as the identity recorded across `TaggedUser`, `UpdatedBy`, `UserID`, and
+  `InsertedBy`.
+
+---
+
+## 15. Dependencies
+
+None — this is a self-contained data-fix script. No other story, DLL, or service needs to ship
+first.
+
+---
+
+## 16. Test Scenarios
+
+| # | Scenario | Expected Result |
+|---|---|---|
+| 1 | Task genuinely open (`isComplete` = 0/NULL) before run | After run: `isComplete=1`, `isFollowUp=0`, `isPendingQC=0`, `CompletedDate`/`TaggedUser`/`UpdatedBy` = this run; task appears on Completed tab; new note + history entry present |
+| 2 | Task already `isComplete = 1` with stale `isFollowUp = 1` before run | After run: `isFollowUp=0`, original `CompletedDate`/`TaggedUser` unchanged; task no longer appears on Follow-Up tab; new note + history entry present |
+| 3 | Script run a second time immediately after the first | Identification step finds 0 eligible rows (all `isFollowUp` now 0) — script safely no-ops, nothing double-processed |
+| 4 | `tbl_ExceptionQueue` and `tbl_ExceptionQueue_Tax_Info` row/column state | Unchanged before vs. after — no new rows, no indicator-column changes |
+| 5 | DIR/DMU/TSP active search screens, post-run | Closed tasks no longer appear (those screens already filter out `isComplete = 1`) |
+| 6 | Follow-Up tab, post-run | Empty (aside from any genuinely new items created after the cleanup ran) |
+
+---
+
+## 17. Deployment Sequence
+
+1. Run the test script's discovery queries to confirm the eligible population size in the target
+   environment immediately before the run.
+2. Run `01_US129257_EPQFollowUp_BulkCleanup.sql` once.
+3. Run the test script's post-verification queries (population now empty, notes/history present,
+   `tbl_ExceptionQueue`/`tbl_ExceptionQueue_Tax_Info` unchanged).
+4. Spot-check a small sample of closed tasks in the UI (Completed tab, Notes tab, Data History
+   tab) to visually confirm.
+
+No DLL deployment, service restart, or web recycle is required — no application code changed.
+
+---
+
+## 18. Open Questions
+
+**Q1.** Final text for the "closed by" label (≤ 20 characters, must include the ticket number).
+   Context: PO asked for the ticket number to be included; the `TaggedUser` column is `VARCHAR(20)`.
+   Impact: Used verbatim across `TaggedUser`/`UpdatedBy`/`UserID`/`InsertedBy` in the script.
+   Status: ⏳ Pending — default in use: `EPQClean-129257` (alternatives offered: `EPQCleanup-129257`, `US129257 Cleanup`)
