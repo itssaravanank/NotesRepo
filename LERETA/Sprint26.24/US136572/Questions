@@ -1,0 +1,132 @@
+## Open questions for US-136572, with suggested approach
+
+```
+Q1. When MPS sends back a Follow-up Date, should the task still complete, or go into
+    Follow-Up status instead?
+    Context   : Every MPS callback completes the task today, and completion sets
+                isFollowUp = 0. The screen hides the follow-up date on a completed task.
+    Suggested : Keep completing the task as today and only save the date. The story
+                says "Follow-up Date is updated in the source system" and asks for no
+                status change. Moving the task into Follow-Up would be a new status
+                transition and would leave it locked on the screen (MPSExtractDate).
+    Impact    : Blocks the whole inbound Follow-up Date design (AC 5d).
+    Status    : ⏳ Pending
+
+Q2. In what format does MPS expect Payment Status outbound?
+    Context   : Stored as 'P' / 'D' / NULL. The mapping image asks for "Number 1".
+    Suggested : Send a number that mirrors the inbound paymentCode: P -> 1, D -> 0,
+                NULL -> not sent. Both directions then mean the same thing.
+    Impact    : Blocks the outbound Payment Status mapping and the DTO type.
+    Status    : ⏳ Pending
+
+Q3. What are the agreed JSON names and formats for the new fields?
+    Context   : The names are a contract with MPS / Common Services.
+    Suggested : Reuse the names the inbound contract already has, so both directions
+                match: billNumber, penaltiesAndInterest, paymentCode, plus a new
+                followUpDate (outbound and inbound).
+                  - penaltiesAndInterest: decimal with 2 places, like amountDue.
+                  - followUpDate outbound: sent the same way as the existing asofDate
+                    and goodThruDate.
+                  - followUpDate inbound: read with the existing lenient date parser,
+                    which accepts YYYYMMDD and ISO.
+                  - Empty values: sent as null, like the existing optional fields.
+                This still needs MPS confirmation before merge.
+    Impact    : Blocks the DTO changes in both directions.
+    Status    : ⏳ Pending
+
+Q4. Which P&I value goes in the outbound payload?
+    Context   : The payload is one item per task; P&I is stored per installment in
+                tbl_ExceptionQueue_Tax_YearInfo.
+    Suggested : The P&I of the task's own tax year + installment. No value when that
+                row does not exist (not 0, so MPS can tell "none" from "zero").
+                Needs a new LASOutsourcing synonym and EF entity for Tax_YearInfo.
+    Impact    : Blocks the new join and the synonym / EF entity design.
+    Status    : ⏳ Pending
+
+Q5. Which Bill Number goes outbound, and what happens when it is longer than 10?
+    Context   : Bill Number exists per task (Tax_Info) and per installment
+                (Tax_YearInfo). The column allows 50; DEV has nothing over 10.
+    Suggested : Use tbl_ExceptionQueue_Tax_Info.BillNumber. If it is longer than 10,
+                truncate to 10 and log the lengths (the existing mailing-address
+                pattern), so the item is never dead-lettered (AC 3).
+    Impact    : Blocks the outbound Bill Number mapping and its validation attribute.
+    Status    : ⏳ Pending
+
+Q6. Are AC 5a-5c considered met by the existing inbound handling?
+    Context   : billNumber, penaltiesAndInterest and paymentCode are already received
+                and saved for DIR / DMU.
+    Suggested : Yes. No code change for these three; cover them with verification
+                tests. Leave the two existing behaviours alone (an empty inbound bill
+                number blanks the per-installment value; over-10 values are accepted),
+                since changing them is outside this story.
+    Impact    : Decides whether inbound work is Follow-up Date only.
+    Status    : ⏳ Pending
+```
+
+Reply "agree" to accept all the suggestions, or list the question numbers you want changed. Q1 is a business decision and Q5 needs the MPS / Common Services owner, so those two are worth confirming with them even if you agree with my suggestion.
+
+Accepting the suggestions is not a go-ahead to implement; I'll wait for an explicit "proceed" before changing any file.
+
+
+Written for: the MPS / Common Services team (with the PO and Lead copied).
+
+Here is Q10 again with the new field separated from the existing ones.
+
+---
+
+**Q10. What payload structure will MPS send back to us for an EPQ item? Is the sample below correct?** (MPS / Common Services)
+
+- **Context:** when MPS finishes an EPQ item (DIR or DMU), it posts the result to our `POST /api/Receiver` endpoint. The story needs four values to come back. Three of them already exist in the message, and we plan to keep using those fields. Only Follow-up Date is new.
+
+| Story field | Field in the message | Where | Status |
+|---|---|---|---|
+| Bill Number | `billNumber` | inside each `taxLines` entry | Existing, reused as is |
+| P&I | `penaltiesAndInterest` | inside each `taxLines` entry | Existing, reused as is |
+| Payment Status | `paymentCode` (0 = unpaid, 1 = paid) | inside each `taxLines` entry | Existing, reused as is |
+| Follow-up Date | `followUpDate` | top level of the message | **NEW, proposed** |
+
+- **Suggested:** no change to the existing structure. Add one field, `followUpDate`, at the top level, because the follow-up date belongs to the whole item and not to one installment.
+
+```jsonc
+{
+  "correlationId": "8addc3bb-2404-4dcb-baa3-e6b0eb54a523",
+  "sourceUniqueId": "DMU-131397-45",
+  "followUpDate": "20261215",              // NEW: Follow-up Date (proposed)
+  "taxLines": [
+    {
+      "year": "2022",
+      "installment": "1",
+      "paymentCode": 0,                    // EXISTING: used for Payment Status
+      "penaltiesAndInterest": 308.21,      // EXISTING: used for P&I
+      "billNumber": "1234567890",          // EXISTING: used for Bill Number
+      "amountDue": 5970.06,
+      "baseAmount": 5400.73,
+      "goodThruDate": "2026-12-31",
+      "goodThruDate2": null,
+      "balanceDue2": 0,
+      "specialCondition": "",
+      "asOfDate": "2026-11-18",
+      "checkType": null,
+      "eldDate": "2022-11-01",
+      "notes": "Example note",
+      "leretaLiability": null,
+      "paymentOptionIndicator": null
+    }
+  ]
+}
+```
+
+  The `//` comments are only there to explain the sample; they are not part of the message. Fields without a comment are existing fields that this story does not touch. The values are examples only.
+
+- **Please confirm for the three existing fields:**
+  - Bill Number, P&I and Payment Status will keep arriving in `taxLines` as `billNumber`, `penaltiesAndInterest` and `paymentCode`, with no rename and no new fields for them;
+  - `paymentCode` keeps its meaning: 0 = unpaid, 1 = paid.
+- **Please confirm for the new field:**
+  - its name and position: `followUpDate` at the top level, as shown, or inside each tax line;
+  - its format: `YYYYMMDD` as in the story, or another date format;
+  - what is sent when there is no follow-up date: `null`, or the field left out;
+  - whether a message carrying a follow-up date means the item is finished, or that MPS is still working on it and will send another message later.
+- **Impact:** blocks the inbound Follow-up Date change (AC 5d). The last point also decides Q1, whether the task is completed or moved to Follow-Up.
+- **Status:** ⏳ Pending
+
+---

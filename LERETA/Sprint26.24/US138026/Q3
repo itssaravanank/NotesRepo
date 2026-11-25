@@ -1,0 +1,79 @@
+Inserted into memory file 
+
+Simplified version: each question has a reference and a suggestion.
+
+---
+
+## US-138026: New HM Import One time – Prior Data Dump
+
+**Q1. Which file format will the mainframe send: pipe-delimited ( | ) or fixed positions (250 characters per line, as in the attached layout)? Will it also include a total record count?**
+- **Reference:** Scope: "Text File pipe delimited, Layout – see attached" and "reconciliation of imported records"; AC1.
+- **Suggestion:** Use the attached layout as it is (250 characters per line). Ask the mainframe to add a total record count so we can check that every record arrived. The mainframe team confirms and sends a sample.
+
+**Q2. Is this a one-time load, and how will the file be delivered (file name, location, approximate number of records)?**
+- **Reference:** Title: "One time – Prior Data Dump"; Scope: "Create a new LNET import job…".
+- **Suggestion:** One-time load per environment, started manually. It is delivered like the CHM file, but in its own folder with its own file name. The mainframe team shares the file name and the expected record count.
+
+**Q3. Do you expect a report for this import?**
+- **Reference:** Synopsis: "…SSRS reporting structure currently used by the CHM import process". The scope lists no report. Out of Scope: "Downstream workflows".
+- **Suggestion:** No new report and no change to the CHM customer report. We provide an import summary (records read, loaded, rejected) and an error email if the load fails.
+
+**Q4. (Lead) Should this import use the same tool as the CHM import (SSIS) or the newer ADF pipeline?**
+- **Reference:** Scope: "Create a new LNET import job" and "import rules similar to CHM import process".
+- **Suggestion:** SSIS, the same as the CHM import, unless new imports are already planned for ADF.
+
+**Q5. Can the mainframe team give us a small sample file (about 50–100 records) for testing?**
+- **Reference:** AC1. It is also needed to test US-138027 and US-138028.
+- **Suggestion:** Yes, ideally with parcels that match open CHM records in the test environment. If that is not possible, we create a test file from existing CHM records and QA runs the load.
+
+---
+
+## US-138027: Prior Data Store and Linkage
+
+**Q1. The file has only Agency ID and Tax ID. Which Tax ID on the CHM record should it match: LERETA Tax ID, Client Tax ID or Override TaxID?**
+- **Reference:** Scope: "link priors only once for a given tax ID/agency ID"; AC6.
+- **Suggestion:** Agency ID + LERETA Tax ID, ignoring capital/small letters and extra spaces. We confirm it with the sample file.
+
+**Q2. If several CHM records have the same Agency ID and Tax ID (for example, the same loan with different tax years or installments), which record gets the priors?**
+- **Reference:** Scope: "link priors only once…"; AC8; AC9.
+- **Suggestion:** The first Open CHM record gets them. They stay on that record, even after it is completed, and are not linked to any other record.
+
+**Q3. Which CHM records count as "Open": only status "O – Open", or every record not yet completed? Should they get priors right after the prior file loads, or at the next CHM import?**
+- **Reference:** Scope and AC7: "When an existing CHM record status is 'Open'… link them"; AC6.
+- **Suggestion:** Open means every record not yet completed (New, Open, Worked, Follow-up, Research, Pending QC). Link them right after the prior file loads and again on every CHM import.
+
+**Q4. Linking priors during the CHM import is written in both US-138027 and US-138028. Which story owns it?**
+- **Reference:** US-138027 AC6, AC7; US-138028 Scope: "Update the CHM import process to identify and link matching prior data records".
+- **Suggestion:** US-138027 owns storing and linking, including the CHM import change. US-138028 only displays the linked data.
+
+---
+
+## US-138028: TDT OI UI – Linked CHM Records to Prior Data
+
+*Already decided: prior data is shown in the existing "Prior Information" panel (AC1, AC6).*
+
+**Q1. Should users only view the imported prior data, or also be able to edit and save it?**
+- **Reference:** Scope: "Display prior data as historical information"; AC3; US-138027 AC3 and AC4.
+- **Suggestion:** View-only, in a clearly labelled read-only area inside the Prior Information panel. Saving would copy the data into the loan's own prior information. That would change the CHM customer report, payment file and transmittal amounts, which are out of scope.
+
+**Q2. Which file fields should be shown on screen? (The panel has one Redeem Amount / Good Thru set per loan, but the file has them on every tax-year row.)**
+- **Reference:** AC6: "approved UI design"; AC4: multiple prior records.
+- **Suggestion:** One row per prior tax year showing Tax Year, PC, Installment 1–4, P/I 1–4 and that row's two Redeem Amount / Good Thru pairs. The other file fields are stored but not shown: Bill Type, Penalty-Interest total, Sales Number, and added/updated by and date.
+
+**Q3. Is it OK that prior data is visible only after clicking "Add Prior / View Prior", and not when a loan is opened from the Completed list?**
+- **Reference:** AC2; AC7.
+- **Suggestion:** Yes, keep it as today, with no change to the Completed list. When there are no priors, the panel looks exactly as it does now.
+
+---
+
+## We will proceed with these unless you tell us otherwise
+1. Load every record in the file (not only those marked HM) and keep values exactly as received (US-138026 AC1; US-138027 AC3).
+2. Same Agency ID + Tax ID + Tax Year + Bill Type = same record. Duplicates are skipped and logged (US-138027 AC9).
+3. A bad record is skipped and logged with its line number, original line and reason. The load continues, and failure emails go to the same people as the CHM import (US-138026 AC2).
+4. Priors with no matching CHM record are kept (US-138027 AC2).
+5. A linking problem never stops the CHM import. It is logged.
+6. If a tax year exists both as imported and as user-entered, both are shown and the imported one is labelled (US-138028 AC4, AC5).
+7. Prior data appears only on CHM loans, newest tax year first, with the same access rules as Loan Details (US-138028 AC1).
+8. No change to the CHM customer report, payment file, transmittal amounts, or the existing Prior Information Save and Cancel.
+
+Waiting for answers. Nothing will change until you reply with "ok", "yes", "proceed", "implement" or "go ahead".

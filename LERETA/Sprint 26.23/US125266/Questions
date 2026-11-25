@@ -1,0 +1,49 @@
+Here's the revised version — each question now explained first, then the suggested approach:
+
+---
+
+**Open Questions & Suggested Direction — for Lead/PO review before implementation**
+
+**1. Which date should "win" — the latest or the earliest?**
+*Explanation:* Each tax agency has several possible key dates tracked in the calendar system (called ELD0, ELDH, ELDX). To decide if an installment is 20 days overdue, the system has to pick just one of these to measure against. Today it picks whichever is the **latest**. A separate, very recent related ticket appears to have intended to switch this to the **earliest** instead, but that change doesn't seem to have actually been applied to the live system. Picking the wrong one changes which installments get flagged, and when.
+*Suggested approach:* Keep "latest" (matches today's behavior and this story's own notes), but confirm with whoever owns that other ticket that it wasn't meant to override this.
+
+**2. How do we define "current tax year"?**
+*Explanation:* Part of this story is making sure that fixing an old, historical tax record can never accidentally create a brand-new task as if it were a live, current issue. To do that, the system needs a reliable way to know "is this the current tax year, or an old one?" There's no agreed definition for that yet.
+*Suggested approach:* Use the tax year already recorded against that installment in the Tax Cycle team's own calendar data, compared to the most recent tax year on file for that agency — needs PO/Lead confirmation this matches business expectations.
+
+**3. How do we update an open task's date without bringing back duplicate tasks?**
+*Explanation:* A separate, recent fix was put in place to stop the system creating duplicate tasks for the same loan. It works by completely ignoring any further changes once a task is already open — which also blocks the very thing this story wants: updating that open task when its date changes.
+*Suggested approach:* Only let an update through if the new date is actually different from what's already stored; keep blocking it if nothing changed.
+
+**4. Which exact fields need to be kept up to date?**
+*Explanation:* Behind the scenes there are two separate fields that both relate to "the ELD date," plus a separate "SLA due date" field that today never updates once a task is created. We've identified exactly which fields these are, but need confirmation on whether all of them need to move together.
+*Suggested approach:* Confirm all three should be refreshed together as part of this fix.
+
+**5. Should this react the same day, or on the next scheduled run?**
+*Explanation:* When a key date changes, should the system react immediately, or is it fine for the task to update the next time the nightly process runs (potentially up to 24 hours later)? This materially changes how much new technical work is required.
+*Suggested approach:* "Next nightly run" — lower risk, no new real-time mechanism needed, task still appears within 24 hours.
+
+**6. What should the audit trail look like?**
+*Explanation:* The story asks for some record showing a task was updated specifically because of a calendar date change. We need to agree on what form that takes.
+*Suggested approach:* Reuse the existing notes/history feature already visible on each task, with a new note specifically flagging this reason.
+
+**7. Does "New" really need to be treated differently from "Open"?**
+*Explanation:* The story describes re-evaluating "New," "Open," and "Follow-Up" tasks as three different things. It's not yet clear there's a meaningful difference between "New" and "Open" for this fix — they may just be the same bucket (not yet completed).
+*Suggested approach:* Treat both the same for this fix unless told otherwise.
+
+**8. (PO's question) Should we also catch installments that already missed their window, not just react going forward?**
+*Explanation:* As written, this story only reacts to date changes from now on — it won't automatically go back and fix things already broken today (like installments that passed 20 days weeks ago with no task ever created).
+*Suggested approach:* Yes — include this, since it directly addresses the original complaint and comes nearly free once the eligibility check is being reworked anyway.
+
+**9. (PO's question) Does the existing Allegheny data need a one-time manual fix?**
+*Explanation:* The real example that started this story is already missing its task today, and this fix alone won't automatically correct that existing record unless question 8 is also covered.
+*Suggested approach:* Yes, but as a small separate follow-up — run it only after the main fix is live and confirmed working.
+
+**10. (PO's question) If a date change already lands past 20 days the moment it happens, should it load immediately?**
+*Explanation:* Same underlying decision as question 5, just from the "what if we're already late" angle.
+*Suggested approach:* Covered automatically if "next nightly run" is accepted for question 5 — no separate handling needed.
+
+**11. Should the other two related queues get this same fix?**
+*Explanation:* This story's requirements are all about the "Delinquent Installment Search" queue, but the underlying process is shared code that also powers two similar queues (Monthly Updates and Tax Sale Procurement). Leaving them untouched is safer, but means they could still have this exact same problem, just not fixed here.
+*Suggested approach:* Keep changes scoped to Delinquent Installment Search only, but test the other two afterward to confirm they still behave exactly as today.

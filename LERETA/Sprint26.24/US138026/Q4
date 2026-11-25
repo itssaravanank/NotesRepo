@@ -1,0 +1,91 @@
+Inserted into memory file 
+
+### US-138026 – Questions for PO and Lead review
+
+**Confirmed: the file will not contain a total record count.**
+- **Reference:** Scope: "reconciliation of imported records".
+- **Suggestion:** We check the load from our side. The import summary shows:
+  - lines read
+  - loaded
+  - rejected (with line number and reason)
+  - duplicates skipped
+  - how many were linked or not yet linked
+
+  Any difference is flagged, and a short or odd last line is flagged as a possible incomplete file. Optionally, the mainframe team emails the number of records they extracted so we can compare it once. This is not blocking.
+
+**Confirmed: the import will be built in SSIS, the same as the CHM import.**
+- **Reference:** Scope: "Create a new LNET import job"; "import rules similar to CHM import process".
+
+**Confirmed: no new report for this import.**
+- **Reference:** Synopsis: "…SSRS reporting structure currently used by the CHM import process"; Scope: "Logging, error handling, and reconciliation of imported records"; Out of Scope: "Downstream workflows after import process".
+- **Suggestion:** We provide the import summary and an error email if a load fails. There is no change to the existing Handle Manual CHM Report.
+
+**Q1. Will the file be pipe-delimited or fixed-width, and can the mainframe team send a small sample file for testing?**
+- **Reference:** Scope: "Text File pipe delimited, Layout – see attached"; AC1. The attached layout is fixed-width (250 characters per line).
+- **Suggestion:** Fixed-width, as in the attached layout. The mainframe team confirms this and sends a sample file of about 50–100 records. Ideally some parcels in it already exist as open CHM records in the test environment. If a sample is not possible, we create a test file from existing test CHM records and QA runs the load.
+
+**Q2. Is this file sent only once?**
+- **Reference:** Title: "One time – Prior Data Dump"; Scope: "Create a new LNET import job…".
+- **Suggestion:** One-time load in each environment. We create the job but keep it switched off and start it manually. Running the same file twice will not create duplicate records.
+
+**Q3. What is the file name format, which folder will it be placed in, and will it be a single file only?**
+- **Reference:** Synopsis: "The incoming file will contain all customers' datasets"; Scope: "Create a new LNET import job to retrieve Prior Data items from the Mainframe".
+- **Suggestion:** A single file with all customers' data. It is delivered the same way as the CHM file, into its own folder with its own file name format. The mainframe team confirms the file name format and the folder.
+
+**We will proceed with these unless you tell us otherwise**
+1. Load every record in the file (not only those marked HM) and keep the values exactly as received (AC1).
+2. A bad record is skipped and logged with its line number, the original line and the reason. The load continues. Failure emails go to the same people as the CHM import (AC2).
+3. Records with the same Agency ID + Tax ID + Tax Year + Bill Type count as the same record. A duplicate is skipped and logged (US-138027 AC9).
+
+
+Inserted into memory file 
+
+This replaces US-138026 Q2 and stays Q2, so the cross-reference in US-138027 Q1 still works.
+
+**Q2. The attached file layout has Agency ID and Tax ID, but no Customer ID, Lender ID or Loan ID. Can you confirm whether the file will include these fields, or how we should match the prior data to our CHM records?**
+- **Reference:** Scope: "Text File pipe delimited, Layout – see attached"; "import rules similar to CHM import process"; AC1; US-138027 Scope: "link priors only once for a given tax ID/agency ID"; AC6.
+- **Suggestion:** Match on Agency ID + Tax ID only, as the story says. The prior data is probably kept per parcel on the mainframe, so it has no loan details. If the mainframe team can easily add Customer ID, Lender ID and Loan ID, we use them to match the exact loan. If not, it is not a blocker, and the "link once" rule (US-138027 Q2) decides which loan shows the prior data.
+
+
+
+
+------------------------------------------------------
+
+Searched for regex `Redeem|Good Thru|GoodThru|Prior Information|P/I|Tax Year|Install` (`**/LERETANet/Web/OutSourcing/COP/OpenItemLoanDetails.aspx`), 301 results
+
+Searched for regex `id="pnlAddPriorInfo"|Redeem Amt|Redeem Amount|Good Thru[^1-2]|>\s*Tax Year\s*<|>\s*PC\s*<|P/I\s*[1-4]?\s*<|Payable to Payee|Bill No` (`**/LERETANet/Web/OutSourcing/COP/OpenItemLoanDetails.aspx`), 16 results
+
+Read , lines 4588 to 4700
+
+Read , lines 4800 to 4900
+
+Searched for regex `ID="txtYear1"|ID="txtPC1"|ID="txtPC5"|ID="txtInstall5"|ID="txtPI5"|ID="txtPrior(PI|P\/I)|ID="pnl[A-Za-z]*"|id="pnl[A-Za-z]*"|ID="txtPenalty|ID="txtNotes|ID="btnSavePriorTaxInfo|ID="btnAddPrior|Add Prior|View Prior` (`**/LERETANet/Web/OutSourcing/COP/OpenItemLoanDetails.aspx`), 19 results
+
+Read , lines 4405 to 4590
+
+Inserted into memory file 
+
+The question asks which details from the prior file users should see on screen, and where the Redeem Amount / Good Thru dates should go.
+
+**What the file has.** One line per tax year for the same Agency ID + Tax ID. Each line has:
+- Tax Year, Bill Type, Penalty-Interest total and Sales Number.
+- Pay code, installment amount and penalty/interest for installments 1–4.
+- Two Redeem Amounts with two Good Until dates.
+- Who added or updated the line, and when.
+
+**What the Prior Information panel shows today.**
+- For each tax year: "Tax Year", "PC", "Install1–4" and "P/I".
+- "Redeem Amt1/2" and "Good Thru1/2" appear only once for the whole loan, below the tax-year rows.
+- It has no fields for Bill Type, Penalty-Interest total, Sales Number, or added/updated by and date.
+
+**What needs deciding.**
+- Whether the extra file details should be shown at all.
+- Where the per-year Redeem Amount and Good Until dates go, since the screen has only one place for them.
+
+**Example (made up).** The file has a 2024 line and a 2023 line for one parcel, each with its own Redeem Amount. The panel has a single "Redeem Amt1" box, so it cannot show both without a change.
+
+Simpler wording:
+
+**Q2. Which details from the prior file should users see on screen? The panel shows Redeem Amt / Good Thru only once per loan, but the file has them on every tax-year line, so where should they go?**
+- **Reference:** AC4: multiple prior records.
+- **Suggestion:** Show each tax year as its own read-only row with Tax Year, PC, Install 1–4 and P/I 1–4. Show that year's two Redeem Amt / Good Thru pairs in the same row. The other file details (Bill Type, Penalty-Interest total, Sales Number, added/updated by and date) are stored but not shown, because the panel has no fields for them today.

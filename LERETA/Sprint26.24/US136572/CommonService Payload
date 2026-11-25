@@ -1,0 +1,51 @@
+{
+  "correlationId": "string",
+  "items": [
+    {
+      "correlationId": "string",
+      "sourceSystem": 0,
+      "sourceUniqueId": "string",
+      "triggerCondition": "string",
+      "taxIdFormatted": "string",
+      "taxIdUnformatted": "string",
+      "clientNumber": "string",
+      "customerNumber": "string",
+      "contractId": "string",
+      "loanNumber": "string",
+      "agencyId": "string",
+      "borrowerName": "string",
+      "propertyAddress": "string",
+      "mailingAddress": "string",
+      "contractIssueDate": "2026-11-19T08:45:17.266Z",
+      "serviceType": "string",
+      "legalDescription": "string",
+      "closingDate": "2026-11-19T08:45:17.266Z",
+      "parcelOrAccountNumber": "string",
+      "triggerConditionId": 0,
+      "bpoAgency": "string",
+      "allowZeroAmount": true,
+      "lienSequenceNumber": "string",
+      "taskTaxYear": 0,
+      "taskInstallment": "string",
+      "installments": [
+        {
+          "correlationId": "string",
+          "taxYear": 0,
+          "frequency": "string",
+          "installment": "string",
+          "specialConditionCode": "string",
+          "amountDue": 0,
+          "baseAmount": 0,
+          "paymentOptionIndicator": "string",
+          "billReceived": "string",
+          "asOfDate": "2026-11-19T08:45:17.266Z",
+          "goodThruDate": "2026-11-19T08:45:17.266Z",
+          "paymentStatus": "string",
+          "billNumber": "string",
+          "followUpDate": "2026-11-19T08:45:17.266Z",
+          "penaltiesAndInterest": 0
+        }
+      ]
+    }
+  ]
+}

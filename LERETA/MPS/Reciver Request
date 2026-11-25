@@ -1,0 +1,26 @@
+  
+{
+  "correlationId": "3E5BA576-7009-42C4-A5FD-B351BE0542EE",
+  "sourceUniqueId": "DIR-01-237430",
+  "taxLines": [
+    {
+      "year": "2026",
+      "installment": "1",
+      "amountDue": 10320.52,
+      "penaltiesAndInterest": 85.89,
+      "goodThruDate": "20260820",
+      "goodThruDate2": "20260915",
+      "balanceDue2": 10356.52,
+      "paymentCode": "0",
+      "specialCondition": "",
+      "billNumber": "0825",
+      "baseAmount": 1258.56,
+      "asOfDate": "20260825",
+      "leretaLiability": "",
+      "notes": "Verified current-year amounts with county.",
+      "paymentOptionIndicator": "A",
+      "checkType": "Certified Funds or Cashiers’ check",
+      "eldDate": "20260920"
+    }
+  ]
+}

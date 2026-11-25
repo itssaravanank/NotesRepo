@@ -1,0 +1,34 @@
+## Step 1 — Find what's currently "late enough to matter"
+
+**Table read:** `LASTotalTaxSolution.dbo.lais_PayeeCalendar`
+**Key columns:** `PayeeID` (the agency), `CurrentTaxYear` (which year this specific row belongs to), `Installment` (1, 2, 3...), `RunCode` (`ELDH`/`ELDX`/`ELD0` — three possible sources for the due date, latest one wins), `DueDate`.
+
+For every `PayeeID` + `CurrentTaxYear` + `Installment` combination, the job picks the **latest** `DueDate` across whichever `RunCode`s exist, then checks:
+```
+DATEDIFF(DAY, DueDate, GETDATE()) BETWEEN 20 AND 60
+```
+Rows that pass get written into a temporary working table, `#tbl_DLQ_Installment_Research` (`PayeeID`, `CurrentTaxYear`, `Installment`, `DueDate`) — this is the "shortlist" from before, now as real rows in SQL.
+
+## Step 2 — Turn that shortlist into an actual to-do list of loans
+
+**Tables joined:**
+- `LASTax.dbo.Lat_LienMasterKey` (`LM`) — one row per loan **per lien** (`LoanID`, `TaxID`, `PropertyID`, `LienSEQ`, `PayeeID`, `LenderID`, `Statecode`, `TaxServiceType`). Joined to the shortlist on `LM.PayeeID = TEMP.PayeeID` — this is the "expand agency → every loan" step.
+- `LASTax.dbo.lat_ContractMasterKey` (`CM`) — joined on `ContractID`, used for `LCR_CANCEL_CODE`.
+- `LASTax.dbo.tbl_ExceptionQueue_Assign_ExceptionService` (`ES`) — joined on `LenderID` + `Statecode`, must have `DLQResearchInd = '1'`.
+- `LASCommon.dbo.lac_AgencyProfile` (`ap`) — joined on `AGENCY_ID`, must have `Late_Rels <> 'U'`.
+- `LASCommon.dbo.lac_CustomerProfile` (`CP`) — for the customer name.
+
+Additional filter: `LM.TaxServiceType = 'B'`.
+
+Everything that survives all these joins/filters gets written into **`LASTax.dbo.tbl_ExceptionQueue_Staging`** (truncated and rebuilt every run) — one row per loan+lien, columns include `LoanID`, `AgencyID`, `TaxID`, `PropertyID`, `LienSEQ`, `DLQResearchInd`, `CancelCode`, `ServiceType`, etc.
+
+## Step 3 — Go through the to-do list one item at a time
+
+A cursor (`Cur_ExceptionQueue`) reads `tbl_ExceptionQueue_Staging` row by row. For each row, the very first check:
+```sql
+IF (@CancelCode = 'C')
+    EXEC usp_ExceptionQueue_AutoCompleted_Upd ...   -- separate path, stops here
+ELSE IF (@CancelCode <> 'C')
+    -- continues into Step 4 (the eligibility check)
+```
+`@CancelCode` comes straight from the staging row's `CancelCode` column (itself sourced from `lat_ContractMasterKey.LCR_CANCEL_CODE` back in Step 2). Cancelled contracts never reach any of the DIR logic — they're fully handled by `usp_ExceptionQueue_AutoCompleted_Upd` instead.

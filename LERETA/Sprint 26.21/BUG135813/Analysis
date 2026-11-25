@@ -1,0 +1,13 @@
+CrystalDecisions.CrystalReports.Engine.LogOnException
+  HResult=0x80041800
+  Message=Database logon failed.
+  Source=<Cannot evaluate the exception source>
+  StackTrace:
+<Cannot evaluate the exception stack trace>
+
+Inner Exception 1:
+COMException: Database logon failed.
+
+
+In demo 99998 and Job Run Name: RI253062
+ 

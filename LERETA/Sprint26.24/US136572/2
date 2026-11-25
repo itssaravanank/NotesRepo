@@ -1,0 +1,115 @@
+Written for: PO and Lead, as a comment on the US-138600 user story in Azure Boards.
+
+I have nine questions for the PO and Lead, plus four points that only Common Services can answer. If you post this on the story, the same payload block from the US-136572 comment can go under the intro.
+
+**US-138600 – Questions for PO / Lead review**
+
+Common Services has shared the outbound payload they expect from us. Each task now carries an `installments` list: the task's own record, plus one entry per prior installment. `taskTaxYear` and `taskInstallment` tell MPS which entry is the task's own.
+
+**Q1. COP items**
+- **Context:** Common Services confirmed the new format applies to COP as well. COP gets no new data, but it must be sent in the new shape (one installment per item) and needs regression testing.
+- Is the COP change part of this story, or a separate story?
+- Please confirm.
+
+**Q2. What "prior records" means**
+- Can we treat prior records as the lines shown in the Prior Information panel of the task, and not earlier monthly cycles or other tasks of the same loan?
+- Please confirm.
+
+**Q3. How many prior records**
+- Can we send all lines the panel shows, with no limit, including tax years later than the task's own year?
+- Please confirm.
+
+**Q4. Empty installment slots**
+- **Context:** the panel shows four installment slots per tax year, and some are empty.
+- Can we send only the installments that have data?
+- Please confirm.
+
+**Q5. Same tax year and installment on the task and in the panel**
+- **Context:** sometimes the panel has a line for the task's own tax year and installment, with different values. Example `DMU-131397-45`: the task is 2022 / 1st, Delinquent, with Redeem Amt1 5970.06. The panel line for 2022 / 1st has Payment Code 1, amount 3852.62 and P&I 308.21.
+- Can we send it once, with the task's own amount and Payment Status, and take only the P&I and Bill No. from the panel line?
+- Please confirm.
+
+**Q6. Values we do not hold for a prior installment**
+- **Context:** Base Amount, As Of Date, Good Thru Date, Special Condition Code, Frequency and Payment Option are held once per task, not per prior installment.
+- Can we send these blank on the prior installments?
+- Please confirm.
+
+**Q7. ELD Date and Notes**
+- **Context:** the panel shows an ELD Date and notes per installment, but the payload has no field for them.
+- Can we leave them out?
+- Please confirm.
+
+**Q8. Prior line with an invalid tax year**
+- **Context:** the payload needs the tax year as a number, and the panel stores it as text.
+- Can we leave such a line out, log it, and still send the task?
+- Please confirm.
+
+**Q9. Release**
+- **Context:** existing fields move into the `installments` list, so the old and new formats cannot be mixed.
+- Can we release US-138600 and US-136572 together, on the same day as MPS, with COP, DIR and DMU switching at once?
+- Please confirm.
+
+**Pending with Common Services (for information)**
+- **Required fields:** which installment fields are required, and whether blank (`null`) is accepted for the rest. Q6 depends on this.
+- **New fields with no LERETA value:** what to send in `triggerCondition`, `billReceived` and the `correlationId` on each installment.
+- **Removed fields:** `coBorrowerName` and `previousOwnerName` are sent today but are not in this payload. Is that intended?
+- **Old format:** will it still be accepted for a period, or is it a hard switch? Q9 depends on this.
+
+
+
+Written for: PO and Lead, as the merged question for the US-138600 Azure Boards comment.
+
+This replaces Q2 and Q3. The remaining questions move up to Q3–Q6, and the "Required fields" note under Common Services should now point to Q3.
+
+**Q2. Which prior records are sent**
+- **Context:** the Prior Information panel can have lines for any tax year, including years later than the task's own year. Sometimes it also has a line for the task's own tax year and installment, with different values. Example `DMU-131397-45`: the task is 2022 / 1st, Delinquent, with Redeem Amt1 5970.06. The panel line for 2022 / 1st has Payment Code 1, amount 3852.62 and P&I 308.21.
+- Can we send all lines the panel shows that have data, with no limit, including tax years later than the task's own year?
+- When the panel has a line for the task's own tax year and installment, can we send it once, with the task's own amount and Payment Status, and take only the P&I and Bill No. from the panel line?
+- Please confirm.
+
+
+
+Written for: PO and Lead, as a comment on the US-138600 user story in Azure Boards.
+
+You are right. On the screen the panel is labelled "Delinquency Information" (opened with the "Add / View Delinquency Information" button); "Prior Information" is only the name used in code comments. Corrected question:
+
+**Q1. Which prior records do we send to MPS?**
+
+**Example 1 (UAT):** Loan 15014601, DMU. The task is tax year 2025, 1st installment, Redeem Amt1 964.69. The Delinquency Information panel shows five lines: 2024 / 1st, 2024 / 2nd, 2025 / 1st, 2025 / 2nd and 2026 / 1st.
+
+**Example 2 (UAT):** Loan 1000209, DMU. The task is tax year 2022, 1st installment, Payment Status Delinquent. The Delinquency Information panel line for 2022 / 1st has Payment Code 1 (Paid).
+
+Please confirm:
+
+1. Can we send the lines shown in the Delinquency Information panel of the task as the prior records?
+2. Tax year 2026 is later than the task's tax year (2025) in example 1. Can we ignore the 2026 line and not send it to MPS?
+3. In example 1 the panel also has the task's own tax year (2025) with two installments, 1st and 2nd. What should we send for them?
+   - **Option A:** send 2025 / 1st only once, as the task's own record, and send 2025 / 2nd as a separate installment.
+   - **Option B:** send only the task's own record for 2025 and ignore both panel lines of 2025.
+4. In example 2 the task and the panel line have the same tax year and installment, but the payment differs: the task is Delinquent and the panel line is Paid. Which one should we send to MPS?
+   - **Option A:** the task's Payment Status (Delinquent = 0).
+   - **Option B:** the panel line's Payment Code (1).
+
+The same wording applies to the other questions and comments I gave earlier: wherever they say "Prior Information panel", it should read "Delinquency Information panel". The two high-level documents also still use the old name; I have not changed them.
+
+
+
+Written for: PO and Lead, as a comment on the US-138600 user story in Azure Boards.
+
+**Q1. Which Delinquency Information lines do we send to MPS?**
+
+**Context:** the Delinquency Information panel shows every installment line stored for the task. It is not limited to prior years; it can also hold lines for the task's own tax year and for future tax years.
+
+**Example 1 (UAT):** Loan 15014601, DMU. The task is tax year 2025, 1st installment. The panel shows five lines: 2024 / 1st, 2024 / 2nd, 2025 / 1st, 2025 / 2nd and 2026 / 1st.
+
+**Example 2 (UAT):** Loan 1000209, DMU. The task is tax year 2022, 1st installment, Payment Status Delinquent. The panel line for 2022 / 1st has Payment Code 1 (Paid).
+
+Please confirm:
+
+1. Can we send the lines of earlier tax years as the prior records (2024 / 1st and 2024 / 2nd in example 1)?
+2. Can we ignore the lines of a future tax year (2026 / 1st in example 1)?
+3. Can we ignore the lines of the task's own tax year with a different installment (2025 / 2nd in example 1)?
+4. The line with the same tax year and installment as the task (2025 / 1st in example 1) is the task itself. Can we send it only once, as the task's own record?
+5. In example 2 that line and the task have a different payment: the task is Delinquent and the panel line is Paid. Which one should we send to MPS?
+   - **Option A:** the task's Payment Status (Delinquent = 0).
+   - **Option B:** the panel line's Payment Code (1).

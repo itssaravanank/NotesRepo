@@ -1,0 +1,33 @@
+Here's a comment draft summarizing your understanding, ready to paste:
+
+---
+
+**My Understanding of This Story — Please Correct Me if Anything Is Wrong**
+
+This story addresses two separate reliability issues within the Exception Processing Queue's Delinquent Installment Search (DIR) process.
+
+**Current process:** A scheduled nightly job evaluates each tax installment by comparing today's date against a key date maintained in the Agency Calendar (ELD0/ELDH/ELDX). If exactly 20 days have elapsed since that date, a DIR work item is created for staff to investigate. Once a work item exists and is still open, the job does not revisit or update it again.
+
+**Issue 1:** The eligibility check only evaluates an installment on the exact day the 20-day threshold is met. If that evaluation is missed, or the key date changes afterward, the work item is never created or updated — this is the root cause of the Allegheny example referenced in this story.
+
+**Issue 2:** There is currently no validation confirming an installment belongs to the current tax year before a work item is created. As a result, a correction made to a historical (prior-year) tax record could incorrectly generate a new work item.
+
+**What I understand this story is requesting:**
+- The eligibility check should respond whenever the relevant key dates change, not only on a single matching day.
+- If a work item is already open, it should be updated with the revised date rather than left unchanged.
+- If a work item is already completed, it should remain completed, with only the date refreshed for audit purposes.
+- A new work item should be created where none exists and the installment is now eligible.
+- A tax-year validation should be added so only current-tax-year installments can generate a new work item; prior-year records should not.
+- An audit entry should be recorded whenever this recalculation results in a change.
+
+**Decisions already confirmed:**
+- The update does not need to occur same-day; it is acceptable for it to be reflected on the next scheduled run.
+- The audit entry can reuse the existing notes/history feature already associated with each work item, rather than requiring a new mechanism.
+
+**Still pending confirmation** (listed separately for review): which key date should take precedence when more than one is present, how "current tax year" should be defined, how to safely update an already-open work item without reintroducing a recent duplicate-prevention issue, whether already-missed installments should also be addressed, and whether the related Monthly Updates and Tax Sale Procurement queues are in scope.
+
+I wanted to confirm this understanding is accurate before proceeding further.
+
+---
+
+Let me know if you'd like anything added, removed, or reworded.

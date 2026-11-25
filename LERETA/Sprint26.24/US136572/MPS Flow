@@ -1,0 +1,75 @@
+The two words describe direction from the point of view of our API (LeretaNetMPSAPI).
+
+**Outbound = we send to MPS.**
+An EPQ task (DIR or DMU) in LERETANet needs manual research, so our API packages the task's details and sends them to the MPS team's system.
+
+1. An hourly SQL job (`sp_DLQStaging_i`) picks eligible EPQ tasks and puts them in the outbox table (`outs_Manual_Outbox`).
+2. The dispatcher (every 5 minutes, or `GET /api/Dispatcher`) reads the outbox and builds one payload item per task: loan, lender, tax ID, amounts and so on.
+3. The API posts that payload to MPS, and the task is locked on the LERETANet screen while MPS works it.
+
+For this story, outbound means adding Bill Number, P&I, Payment Status and Follow-up Date to that payload, when the task already has values for them. This is acceptance criteria 1–4.
+
+**Inbound = MPS sends back to us.**
+When the MPS team finishes the research, their system calls our API with the results.
+
+1. MPS posts the result to `POST /api/Receiver` (the `ReceiverController`).
+2. The API stores the message in the inbox table (`outs_Manual_Inbox`).
+3. A background handler reads the message and calls the EPQ stored procedure (`usp_ExceptionQueue_Loan_Details_Upd`), which updates the task's tax data and marks it complete in LERETANet.
+
+For this story, inbound means that if MPS returns updated values for those four fields, we save them back to the EPQ task. This is acceptance criterion 5.
+
+```
+OUTBOUND:  LERETANet EPQ task → outbox → LeretaNetMPSAPI → MPS
+INBOUND:   MPS → LeretaNetMPSAPI (/api/Receiver) → inbox → EPQ task updated in LERETANet
+```
+
+That is why the two halves differ in effort:
+
+- **Outbound:** all four fields are new, because the payload we send has none of them today.
+- **Inbound:** Bill Number, P&I and Payment Status already come back from MPS and are already saved. Only Follow-up Date is new.
+
+The open questions are still waiting on your answers whenever you're ready.
+
+
+
+
+
+
+
+
+Here is the EPQ (DIR / DMU) flow in both directions, with the method called at each step. COP follows the same pattern through its own methods.
+
+## Outbound: our API sends items to MPS
+
+**Before the API runs:** a SQL Agent job runs `sp_DLQStaging_i`, which inserts the open DIR / DMU items into `outs_Manual_Outbox` and stamps `MPSExtractDate` on them.
+
+1. **Trigger.** Either the scheduled job [DispatcherQuartzJob.Execute](LeretaNetMPSAPI/ManualProcurementQueueAPI/Jobs/DispatcherQuartzJob.cs#L21) or a manual `GET /api/Dispatcher` ([DispatcherController.Get](LeretaNetMPSAPI/ManualProcurementQueueAPI/Controllers/DispatcherController.cs#L56)). Both run cancellations, then COP, then EPQ.
+2. **EPQ entry point.** [ProcurementService.GetAllEPQOutboxOrids](LeretaNetMPSAPI/ManualProcurementQueueAPI.Services/ProcurementService.cs#L784) runs the whole outbound flow for EPQ.
+3. **Pick the rows.** [GetEligibleOutboxRecords](LeretaNetMPSAPI/ManualProcurementQueueAPI.Repositories/ProcurementRepository.cs#L60) is called once for DIR and once for DMU, each with half of the configured batch size.
+4. **Claim the rows.** [ClaimOutboxRecords](LeretaNetMPSAPI/ManualProcurementQueueAPI.Repositories/ProcurementRepository.cs#L1151) locks them so a parallel run cannot send the same items.
+5. **Build the payload.** [GetAllEPQOutboxListByIds](LeretaNetMPSAPI/ManualProcurementQueueAPI.Repositories/ProcurementRepository.cs#L831) joins the EPQ tables and fills one `MpqOutboundPayload` per item.
+6. **Validate.** [ValidateAndHandlePayloadsAsync](LeretaNetMPSAPI/ManualProcurementQueueAPI.Services/ProcurementService.cs#L427) checks each item; an item that fails goes straight to dead letter and is not sent.
+7. **Send.** [SendOutboundRequestAsync](LeretaNetMPSAPI/ManualProcurementQueueAPI.Services/ProcurementService.cs#L485) posts the batch to the MPS import endpoint.
+8. **Record the result.** [UpdateOutboxStatusesFromApiResponseAsync](LeretaNetMPSAPI/ManualProcurementQueueAPI.Services/ProcurementService.cs#L585) updates each outbox row from the per-item response. If the whole call fails, [ApplyBatchFailureDispositionAsync](LeretaNetMPSAPI/ManualProcurementQueueAPI.Services/ProcurementService.cs#L726) decides between retry and dead letter.
+
+## Inbound: MPS sends a completed item back to us
+
+1. **MPS calls us.** `POST /api/Receiver` lands in [ReceiverController.Post](LeretaNetMPSAPI/ManualProcurementQueueAPI/Controllers/ReceiverController.cs#L33) with a `CsInboundMessage`.
+2. **Save first, process later.** [InboundAcceptanceService.AcceptAsync](LeretaNetMPSAPI/ManualProcurementQueueAPI.Services/InboundAcceptanceService.cs#L37) reads the system code, ExceptionID and SeqNo from `sourceUniqueId`, saves the message to `outs_Manual_Inbox` as pending, and starts background processing. MPS gets its 200 response at this point.
+3. **Background processing.** [InboxProcessor.ProcessPendingItemsAsync](LeretaNetMPSAPI/ManualProcurementQueueAPI.Services/InboxProcessor.cs#L20) runs every handler; for DIR / DMU that is [EPQHandler.ProcessUpdates](LeretaNetMPSAPI/ManualProcurementQueueAPI.Services/Handlers/EPQHandler.cs#L37).
+4. **Per inbox row.** [ProcessSingleItemAsync](LeretaNetMPSAPI/ManualProcurementQueueAPI.Services/Handlers/EPQHandler.cs#L55) claims the row, reads the stored message and calls the service.
+5. **Apply to EPQ.** [ProcurementService.ExecuteEpqLoanDetailsAsync](LeretaNetMPSAPI/ManualProcurementQueueAPI.Services/ProcurementService.cs#L1018) does three things:
+   - [GetExceptionQueueHeaderAsync](LeretaNetMPSAPI/ManualProcurementQueueAPI.Repositories/ProcurementRepository.cs#L2042) reads the current record through `Usp_ExceptionQueue_DIR_LoanDetails_Sel` or the DMU version.
+   - [MapToEpqRequest](LeretaNetMPSAPI/ManualProcurementQueueAPI.Services/ProcurementService.cs#L1041) merges the MPS values over the current record and builds the tax-line XML.
+   - [ExecuteExceptionQueueLoanDetailsUpdAsync](LeretaNetMPSAPI/ManualProcurementQueueAPI.Repositories/ProcurementRepository.cs#L2189) calls `usp_ExceptionQueue_Loan_Details_Upd`, which routes to the DIR or DMU update procedure and completes the task.
+6. **Close the inbox row.** The handler marks it completed, or failed with the error if anything threw.
+
+## Where the two stories touch this
+
+| Story | Direction | Main places to change |
+|---|---|---|
+| US-136572 (new fields) | Outbound | Step 5: `GetAllEPQOutboxListByIds` and `MpqOutboundPayload` |
+| US-136572 (Follow-up Date) | Inbound | Step 5: `CsInboundMessage`, `MapToEpqRequest`, `ExecuteExceptionQueueLoanDetailsUpdAsync` and the three update procedures |
+| US-138600 (prior records) | Outbound | Step 5: `GetAllEPQOutboxListByIds` and `MpqOutboundPayload` |
+
+The repo picked up a new commit on `dev` yesterday (Bug 139387, in `GetAllEPQOutboxListByIds`), so line numbers I quoted earlier have moved: the Redeem Amt1 and Good Thru1 mapping is now at [ProcurementRepository.cs:1004-1008](LeretaNetMPSAPI/ManualProcurementQueueAPI.Repositories/ProcurementRepository.cs#L1004-L1008). The mapping itself is unchanged.

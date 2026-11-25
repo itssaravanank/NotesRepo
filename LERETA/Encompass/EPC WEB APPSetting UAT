@@ -1,0 +1,95 @@
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Trace",
+      "Microsoft": "Warning",
+      "Microsoft.Hosting.Lifetime": "Information"
+    }
+  },
+  "AllowedHosts": "*",
+  "Security": {
+    "ContentSecurityPolicy": "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors *; form-action 'self'; script-src 'self' https://cdn.elliemae.io 'nonce-{nonce}'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'",
+    "XFrameOptions": "SAMEORIGIN",
+    "NonceByteSize": 16
+  },
+  "Options": {
+    "Wso2": {
+      "BaseUrl": "https://api-qa.lereta.net",
+      "Port": "8243",
+      "ClientId": "_9zIM6EUwPXkrw02LqMHszBKxXEa",
+      "ClientSecret": "Nz2V4tX2soLAf8FfYfxYZutfENwa",
+      "IntrospectBaseUrl": "https://api-qa.lereta.net",
+      "IntrospectPort": "9443",
+      "IntrospectContext": "/oauth2/introspect",
+      "TokenContext": "/token",
+      "Username": "admin",
+      "Password": "admin"
+    },
+    "FloodApi": {
+      "baseUrl": "https://scabllrr01u.lereta.net:8990",
+      //"baseUrl": "http://localhost:43260",
+      //"baseUrl": "https://scalntap21u.lereta.net:8990",
+      //"baseUrl": "https://scabllrr01u.lereta.net:8990",
+      "floodContext": "/api/v1.0/flood",
+      "SigningKey": "qwertyuiop1234567890hghgfhfghfghfghQ!",
+      "ByPassAuthentication": "false",
+      "floodOriginContext": "/lereta.flood.order.api/v1.0/retrieveloandata",
+      "floodTransactionContext": "/lereta.flood.order.api/v1.0/transaction"
+    },
+    "TaxApi": {
+      //"baseUrl": "https://19e0a021d719.ngrok.io",
+      //"baseUrl": "http://localhost:43260",
+      //"baseUrl": "https://scalntap21u.lereta.net:8990",
+      "baseUrl": "https://scabllrr01u.lereta.net:8990",
+      "taxContext": "/api/taxcertificate",
+      "SigningKey": "hd4RJkvm8sWCKSgwqV2d8NhyYFCsFxXz",
+      "ByPassAuthentication": "false",
+      "taxOriginContext": "/lereta.epc.order.api/retrieveloandata",
+      "taxTransactionContext": "/lereta.epc.order.api/transaction",
+      "NLogPath": "\\\\intraftp\\Data\\Encompass_TaxCertificateLogs\\EPCWEB\\UAT\\Logs",
+      "APIBaseUrl": "https://scabllrr01u.lereta.net:8990",
+      "LeretaCommonWebAPIBaseUrl": "http://scalntap21u.lereta.net:8001",
+      "RequestQueueName": "EPCTAXRequestQueue",
+      "EllieMae": {
+        "BaseUrl": "https://api.elliemae.com",
+        "ClientId": "24vcsqz",
+        "ClientSecret": "rmEO1jSi1CFzDVg@5JJFdpY0ckm5CmZI5HCjoT$ylI^yp0yxiEyT5ezYbErg!TGf",
+        "TokenContext": "/oauth2/v1/token",
+        "SecretKey": "qwertyuiop1234567890hghgfhfghfghfghQ!",
+        "XMLPostbackSupport": "false"
+      },
+        "ClientConfigurations": [
+            {
+                "Id": "1",
+                "DTS_ClientID": "3000945269",
+                "ClientSystem": "CAS",
+                "ClientName": "DTS Service",
+                "IsActive": "true"
+            },
+            {
+                "Id": "2",
+                "DTS_ClientID": "3011136200",
+                "ClientSystem": "EMH",
+                "ClientName": "DTS Service",
+                "IsActive": "true"
+            },
+            {
+                "Id": "3",
+                "DTS_ClientID": "3011147358",
+                "ClientSystem": "TFO",
+                "ClientName": "TRIAD DEV",
+                "IsActive": "true"
+            },
+            {
+                "Id": "4",
+                "DTS_ClientID": "3011353067",
+                "ClientSystem": "TFO",
+                "ClientName": "TRIAD UAT",
+                "IsActive": "true"
+            }
+        ]
+    }
+  }
+}
+
+

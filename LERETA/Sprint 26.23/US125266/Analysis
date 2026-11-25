@@ -1,0 +1,44 @@
+Here's the complete, accurate version — final pass, with all the corrections folded in:
+
+## The Current Process (accurate, end-to-end)
+
+**Step 1 — Calendar data exists.** Table `lais_PayeeCalendar` holds dates per Agency + Tax Year + Installment, tagged with a `RunCode`: `ELD0`, `ELDH`, `ELDX` (used here), plus `ELDC` and others (not used here). Kept current by a separate import process.
+
+**Step 2 — Nightly job runs.** SQL Agent job **`LAS_ExceptionProcessQueue_DataImportNew`** executes stored procedure **`usp_ExceptionQueue_DataImportNew`**.
+
+**Step 3 — Pick one date.** For each Agency + Installment, it takes whichever of `ELD0`/`ELDH`/`ELDX` is **latest** (furthest in the future). Call this "the ELD date."
+
+**Step 4 — The 20-day test.** It checks `DATEDIFF(DAY, ELD date, today) = 20` — **exactly** 20, not "20 or more." Fails this test (too early, or already past) → skipped, no memory kept for next time.
+
+**Step 5 — Passed the test? Now there are two separate checks, in order:**
+
+- **Check A (the "is it open?" guard):** Look at the loan + agency + tax combination as a whole (ignoring tax year/installment) — is there **any** `tbl_ExceptionQueue_UserTracking` row for it where `isComplete = 0`?
+  - **Yes →  stop immediately. Nothing is created or updated at all.** This is the main blocker in the story.
+  - **No** (nothing currently open for this loan/agency — either never existed, or everything about it is already Completed) → continue to Check B.
+
+- **Check B (exact match check):** Does a record already exist for this **exact same Tax Year + Installment**?
+  - **Yes** → update the due date on the existing (completed) record quietly — it stays Completed, doesn't reopen.
+  - **No** → insert a brand-new record, with a brand-new `UserTracking` row marked open (`isComplete = 0`).
+
+**Step 6 — Where the date lands.** The ELD date from Step 3 is written to `tbl_ExceptionQueue_Tax_Info.InstallmentDueDate`. (Note: there's a second, similarly-named field, `tbl_ExceptionQueue_Tax_YearInfo.ELDDate`, but it comes from a different, older data source — not this calendar pivot. Two distinct fields, confusingly similar names.)
+
+**Step 7 — Shows on screen.** The moment Step 5/6 writes a row, it's visible on the Delinquent Installment Search screen the next time anyone loads it — that screen just reads these same tables live, no separate publish step.
+
+## Net effect (the actual bug, in one line)
+Once a loan/agency/tax combination has **any open** DIR item, **Check A blocks everything** — no date refresh, no re-evaluation — until someone marks it Completed. And Step 4's "exactly 20" (not "20 or more") means a missed day, or a calendar correction made after the fact, can permanently skip creating the task in the first place.
+
+
+
+
+| Step | Today (exact mechanics) | What story asks |
+|---|---|---|
+| **1 — Calendar data** | `lais_PayeeCalendar` (DB: `LASTotalTaxSolution`) stores `ELD0`/`ELDH`/`ELDX`/`ELDC` per PayeeID+CurrentTaxYear+Installment. Refreshed by `job_PayeeCalendar_import`, which does a blind staging-diff `UPDATE` — no comparison of old vs. new value, no log of what changed. | No change needed to this table or its load process. |
+| **2 — Nightly job runs** | SQL Agent job **`LAS_ExceptionProcessQueue_DataImportNew`** executes **`usp_ExceptionQueue_DataImportNew`**. Logs its own start/end time to `[LASCommon].[SqlProcess].[Log]`. No application code calls it — purely scheduled. | No change needed — still SQL-only, still scheduled. |
+| **3 — Pick one ELD date** | Pivots `ELD0`/`ELDH`/`ELDX` per PayeeID+TaxYear+Installment, then `CROSS APPLY ... ORDER BY DueDate DESC` picks the **latest** non-null value (tie-break: ELDH > ELDX > ELD0). `ELDC` is not part of this pick at all. | Keep this same picking logic (PO explicitly asked for "greatest," matching today's code) — but see open question below, since a related recent ticket's test expects the opposite. |
+| **4 — The eligibility test** | `DATEDIFF(DAY, winning ELD date, GETDATE()) = @StartDays`, where `@StartDays` = 20, read from `LASCommon.dbo.tbl_Config_Master` (`ConfigSystemCode='EPQ'`). A sibling `@EndDays` value is fetched from the same config table but **never used anywhere** in the procedure. | React whenever the ELD date itself changes — not just whether today happens to be the one exact matching day. The unused `@EndDays` is a strong hint the intended design was always a range, not an exact match. |
+| **5a — "Is it open?" guard** | In `usp_ExceptionQueue_DataImportNewIU` (added by US-120627): checks for any `tbl_ExceptionQueue_UserTracking` row with `isComplete = 0` for the same `LoanID+AgencyID+TaxID+PropertyID+LienSEQ+SystemCode`. If found → logs to `tbl_ExceptionQueue_DedupLog`, marks staging row processed, and `RETURN`s — nothing downstream runs at all. | If an open item exists **and** the incoming ELD date differs from what's already stored → let it through to update, instead of silently suppressing it. If nothing actually changed, keep suppressing (avoid duplicate-task regressions). |
+| **5b — Exact match (completed records)** | If no open row blocked it, and an exact `LenderID+CustID+ContractID+AgencyID+TaxID+LienSEQ+InstallmentNo+TaxYear` match already exists (completed), it archives to `tbl_ExceptionQueue_Archive` and updates only descriptive fields (`BorrowerName`, `PropertyAddress`, etc.) — the completed `UserTracking` row itself is never touched/reopened. | Keep this same behavior — this is already close to "if completed, just update the ELD date" as asked. |
+| **5c — No existing record → insert new** | Inserts a new `tbl_ExceptionQueue` row and a new `tbl_ExceptionQueue_UserTracking` row with `isComplete = 0` — but this path is only ever reached today when Step 4's exact-day match happens to hit. | Once Step 4 reacts properly to changes, this same insert path naturally starts firing for ELD updates it currently misses entirely. No new logic needed here itself. |
+| **6 — Where the date lands** | `tbl_ExceptionQueue_Tax_Info.InstallmentDueDate` gets the Step-3 winning date (on both insert and the "already exists" update). `tbl_ExceptionQueue_Tax_YearInfo.ELDDate` is a **separate** field, sourced from an older delinquency-report function, not this calendar pivot. `SLADueDate` is set once at insert as a flat `DATEADD(MM,1,@Getdate)` — "today + 1 month" — and is never updated again by anything in this procedure. | Add an update path for `SLADueDate` on existing items — today there is literally none. Also clarify which of the two differently-sourced "ELD" fields (`InstallmentDueDate` vs `ELDDate`) the story actually means to keep in sync. |
+| **New — Tax-year check** | `@CurrentTaxYear`/`@InstallmentNo` local variables exist in `usp_ExceptionQueue_DataImportNew` but are declared and reset every loop iteration without ever being assigned or compared to anything — completely dead code today. | Add a real comparison against whatever "current tax year" is decided to be, rejecting anything from a prior tax year before it ever reaches Step 5/6. |
+| **New — Audit record** | No existing log captures "this task was touched because of an ELD recalculation" — only the generic history insert (`Usp_exceptionqueue_history_ins` → `tbl_ExceptionQueue_History`) for other kinds of changes. | Add a log entry (likely extending that same history-insert call) specifically noting an ELD-driven recalculation occurred. |

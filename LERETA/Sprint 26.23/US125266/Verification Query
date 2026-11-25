@@ -1,0 +1,166 @@
+
+--- Query to find all loans that are eligible for exception creation or update based on the winning ELD date and the number of days late.
+DECLARE @StartDays INT;
+SELECT @StartDays = ConfigValue
+FROM [LASCommon].[dbo].[tbl_Config_Master] WITH (NOLOCK)
+WHERE ConfigSystemCode = 'EPQ' AND ConfigKey = 'StartDays';
+
+;WITH Piv AS (
+    SELECT PayeeID, CurrentTaxYear, Installment,
+           MAX(CASE WHEN RunCode = 'ELD0' THEN TRY_CAST(DueDate AS DATETIME) END) AS ELD0,
+           MAX(CASE WHEN RunCode = 'ELDH' THEN TRY_CAST(DueDate AS DATETIME) END) AS ELDH,
+           MAX(CASE WHEN RunCode = 'ELDX' THEN TRY_CAST(DueDate AS DATETIME) END) AS ELDX
+    FROM [LASTotalTaxSolution].dbo.lais_PayeeCalendar WITH (NOLOCK)
+    WHERE RunCode IN ('ELDH','ELDX','ELD0') AND ISNULL(DueDate,'') <> ''
+    GROUP BY PayeeID, CurrentTaxYear, Installment
+),
+Winning AS (
+    SELECT p.PayeeID, p.Installment, p.CurrentTaxYear, w.DueDate AS WinningELDDate,
+           DATEDIFF(DAY, w.DueDate, GETDATE()) AS DaysLate
+    FROM Piv p
+    CROSS APPLY (
+        SELECT TOP 1 v.DueDate
+        FROM (VALUES ('ELDH', p.ELDH), ('ELDX', p.ELDX), ('ELD0', p.ELD0)) v(RunCode, DueDate)
+        WHERE v.DueDate IS NOT NULL
+        ORDER BY v.DueDate DESC, CASE v.RunCode WHEN 'ELDH' THEN 1 WHEN 'ELDX' THEN 2 ELSE 3 END
+    ) w
+),
+Eligible AS (
+    SELECT LM.LoanID, w.PayeeID AS AgencyID, LM.TaxID, LM.PropertyID, LM.LienSEQ,
+           w.CurrentTaxYear AS TaxYear, w.Installment AS InstallmentNo,
+           w.WinningELDDate, w.DaysLate
+    FROM Winning w
+    INNER JOIN [LASCommon].dbo.lac_AgencyProfile ap WITH (NOLOCK) ON ap.AGENCY_ID = w.PayeeID
+    INNER JOIN [LASTax].dbo.Lat_LienMasterKey LM WITH (NOLOCK) ON LM.PayeeID = w.PayeeID
+    INNER JOIN [LASTax].dbo.lat_ContractMasterKey CM WITH (NOLOCK) ON CM.LCR_CONTRACT_ID = LM.ContractID
+    INNER JOIN [LASTax].dbo.tbl_ExceptionQueue_Assign_ExceptionService ES WITH (NOLOCK)
+        ON ES.LenderID = LM.LenderID AND ES.STATE_CODE = LM.Statecode
+    WHERE w.DaysLate = @StartDays
+      AND w.CurrentTaxYear = ap.CURRENT_TAX_YEAR
+      AND LM.TaxServiceType = 'B'
+      AND ES.DLQResearchInd = '1'
+      AND ISNULL(ap.Late_Rels,'') <> 'U'
+      AND ISNULL(CM.LCR_CANCEL_CODE,'') <> 'C'
+)
+SELECT
+    e.LoanID, e.AgencyID, e.TaxID, e.PropertyID, e.LienSEQ, e.TaxYear, e.InstallmentNo,
+    e.WinningELDDate, e.DaysLate,
+    eq.ExceptionID AS ExistingExceptionID, ti.InstallmentDueDate AS ExistingDueDate, ut.isComplete,
+    CASE WHEN eq.ExceptionID IS NULL THEN 'CREATE' ELSE 'UPDATE' END AS Action
+FROM Eligible e
+LEFT JOIN LASTax.dbo.tbl_ExceptionQueue eq WITH (NOLOCK)
+    ON eq.LoanID = e.LoanID AND eq.AgencyID = e.AgencyID
+   AND eq.TaxID = e.TaxID AND eq.PropertyID = e.PropertyID AND eq.LienSEQ = e.LienSEQ   -- <-- the missing match
+LEFT JOIN LASTax.dbo.tbl_ExceptionQueue_UserTracking ut WITH (NOLOCK)
+    ON ut.ExceptionID = eq.ExceptionID AND ut.SystemCode = 'DIR'
+LEFT JOIN LASTax.dbo.tbl_ExceptionQueue_Tax_Info ti WITH (NOLOCK)
+    ON ti.ExceptionID = eq.ExceptionID AND ti.SystemCode = ut.SystemCode
+       AND ti.TaxYear = e.TaxYear AND ti.InstallmentNo = e.InstallmentNo
+WHERE eq.ExceptionID IS NULL OR ti.InstallmentDueDate <> e.WinningELDDate
+ORDER BY e.LoanID, e.LienSEQ;
+
+
+
+--- Query to find the winning ELD date for a specific agency
+
+DECLARE @AgencyID VARCHAR(9) = '';
+
+;WITH Piv AS (
+    SELECT PayeeID, CurrentTaxYear, Installment,
+           MAX(CASE WHEN RunCode = 'ELD0' THEN TRY_CAST(DueDate AS DATETIME) END) AS ELD0,
+           MAX(CASE WHEN RunCode = 'ELD0' THEN PayeeCalendarID END) AS ELD0_ID,
+           MAX(CASE WHEN RunCode = 'ELDH' THEN TRY_CAST(DueDate AS DATETIME) END) AS ELDH,
+           MAX(CASE WHEN RunCode = 'ELDH' THEN PayeeCalendarID END) AS ELDH_ID,
+           MAX(CASE WHEN RunCode = 'ELDX' THEN TRY_CAST(DueDate AS DATETIME) END) AS ELDX,
+           MAX(CASE WHEN RunCode = 'ELDX' THEN PayeeCalendarID END) AS ELDX_ID
+    FROM [LASTotalTaxSolution].dbo.lais_PayeeCalendar WITH (NOLOCK)
+    WHERE PayeeID = @AgencyID
+      AND RunCode IN ('ELDH','ELDX','ELD0') AND ISNULL(DueDate,'') <> ''
+    GROUP BY PayeeID, CurrentTaxYear, Installment
+)
+SELECT w.PayeeCalendarID,p.PayeeID, p.CurrentTaxYear, p.Installment,
+       p.ELD0, p.ELDH, p.ELDX,
+       w.DueDate AS WinningELDDate, w.WinRunCode,
+       DATEDIFF(DAY, w.DueDate, GETDATE()) AS DaysLate
+FROM Piv p
+CROSS APPLY (
+    SELECT TOP 1 v.DueDate, v.RunCode AS WinRunCode, v.PayeeCalendarID
+    FROM (VALUES ('ELDH', p.ELDH, p.ELDH_ID), ('ELDX', p.ELDX, p.ELDX_ID), ('ELD0', p.ELD0, p.ELD0_ID))
+        v(RunCode, DueDate, PayeeCalendarID)
+    WHERE v.DueDate IS NOT NULL
+    ORDER BY v.DueDate DESC, CASE v.RunCode WHEN 'ELDH' THEN 1 WHEN 'ELDX' THEN 2 ELSE 3 END
+) w
+ORDER BY p.CurrentTaxYear DESC, p.Installment;
+
+
+--- Current tax year for a specific agency ID
+
+SELECT CURRENT_TAX_YEAR, AGENCY_ID, CURR_PAYEE_NAME, Late_Rels
+FROM [LASCommon].[dbo].[lac_AgencyProfile] WITH (NOLOCK)
+WHERE AGENCY_ID = @AgencyID;
+
+
+
+
+-- Delete an exception from the queue (if you need to clear it out for testing purposes)
+
+-- [RUN YOURSELF, NOT ME] Replace <ExceptionID> with the one you want to clear.
+DELETE FROM [LASTax].[dbo].[tbl_ExceptionQueue_Tax_Info] WHERE ExceptionID = <ExceptionID> AND SystemCode = 'DIR';
+DELETE FROM [LASTax].[dbo].[tbl_ExceptionQueue_UserTracking] WHERE ExceptionID = <ExceptionID> AND SystemCode = 'DIR';
+DELETE FROM [LASTax].[dbo].[tbl_ExceptionQueue] WHERE ExceptionID = <ExceptionID>
+    AND NOT EXISTS (SELECT 1 FROM [LASTax].[dbo].[tbl_ExceptionQueue_UserTracking] WHERE ExceptionID = <ExceptionID>); -- only delete the parent row if no other SystemCode rows reference it (DMU/TSP may share the same ExceptionID)
+
+
+
+
+
+
+
+
+
+
+--- Query to verify a specific loan's eligibility for exception creation or update based on the winning ELD date and the number of days late. 
+
+DECLARE @LoanID VARCHAR(21) = '<your LoanID>';
+DECLARE @StartDays INT;
+SELECT @StartDays = ConfigValue FROM [LASCommon].[dbo].[tbl_Config_Master] WITH (NOLOCK)
+WHERE ConfigSystemCode = 'EPQ' AND ConfigKey = 'StartDays';
+
+;WITH Piv AS (
+    SELECT PayeeID, CurrentTaxYear, Installment,
+           MAX(CASE WHEN RunCode='ELD0' THEN PayeeCalendarID END) AS ELD0_ID,
+           MAX(CASE WHEN RunCode='ELDH' THEN PayeeCalendarID END) AS ELDH_ID,
+           MAX(CASE WHEN RunCode='ELDX' THEN PayeeCalendarID END) AS ELDX_ID,
+           MAX(TRY_CAST(DueDate AS DATETIME)) AS WinningELDDate
+    FROM LASTotalTaxSolution.dbo.lais_PayeeCalendar WITH (NOLOCK)
+    WHERE RunCode IN ('ELDH','ELDX','ELD0') AND ISNULL(DueDate,'') <> ''
+    GROUP BY PayeeID, CurrentTaxYear, Installment
+)
+SELECT
+    LM.LoanID, LM.PayeeID AS AgencyID, LM.TaxID, LM.PropertyID, LM.LienSEQ, LM.LenderID, LM.Statecode,
+    LM.TaxServiceType,
+    CASE WHEN LM.TaxServiceType = 'B' THEN 'PASS' ELSE 'FAIL - TaxServiceType must be B' END AS Check_TaxServiceType,
+    CM.LCR_CANCEL_CODE,
+    CASE WHEN ISNULL(CM.LCR_CANCEL_CODE,'') <> 'C' THEN 'PASS' ELSE 'FAIL - contract is cancelled' END AS Check_NotCancelled,
+    ES.DLQResearchInd,
+    CASE WHEN ES.DLQResearchInd = '1' THEN 'PASS' ELSE 'FAIL - no/wrong ExceptionService config for this Lender+State' END AS Check_ESConfig,
+    ap.Late_Rels,
+    CASE WHEN ISNULL(ap.Late_Rels,'') <> 'U' THEN 'PASS' ELSE 'FAIL - agency Late_Rels = U (excluded)' END AS Check_LateRels,
+    ap.CURRENT_TAX_YEAR AS AgencyCurrentTaxYear, P.CurrentTaxYear AS InstallmentTaxYear,
+    CASE WHEN ap.CURRENT_TAX_YEAR = P.CurrentTaxYear THEN 'PASS' ELSE 'FAIL - tax year mismatch (Gap 2)' END AS Check_TaxYearMatch,
+    P.WinningELDDate, DATEDIFF(DAY, P.WinningELDDate, GETDATE()) AS DaysLateNow,
+    CASE WHEN DATEDIFF(DAY, P.WinningELDDate, GETDATE()) = @StartDays THEN 'PASS'
+         ELSE 'FAIL - not exactly ' + CAST(@StartDays AS VARCHAR) + ' days late (move PayeeCalendarID below)' END AS Check_ExactDaysLate,
+    COALESCE(P.ELD0_ID, P.ELDH_ID, P.ELDX_ID) AS PayeeCalendarID_ToUpdate,
+    CASE WHEN EXISTS (
+        SELECT 1 FROM LASTax.dbo.tbl_ExceptionQueue eq WITH (NOLOCK)
+        WHERE eq.LoanID = LM.LoanID AND eq.AgencyID = LM.PayeeID
+          AND eq.TaxID = LM.TaxID AND eq.PropertyID = LM.PropertyID AND eq.LienSEQ = LM.LienSEQ
+    ) THEN 'Existing record found - this would UPDATE, not CREATE' ELSE 'No existing record - this would CREATE' END AS Check_ExistingRecord
+FROM LASTax.dbo.Lat_LienMasterKey LM WITH (NOLOCK)
+LEFT JOIN LASTax.dbo.lat_ContractMasterKey CM WITH (NOLOCK) ON CM.LCR_CONTRACT_ID = LM.ContractID
+LEFT JOIN LASTax.dbo.tbl_ExceptionQueue_Assign_ExceptionService ES WITH (NOLOCK)
+    ON ES.LenderID = LM.LenderID AND ES.STATE_CODE = LM.Statecode
+LEFT JOIN LASCommon.dbo.lac_AgencyProfile ap WITH (NOLOCK) ON ap.AGENCY_ID = LM.PayeeID
+LEFT JOIN Piv P ON P.PayeeID = LM.PayeeID
+WHERE LM.LoanID = @LoanID;

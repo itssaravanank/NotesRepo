@@ -1,0 +1,103 @@
+# QA Handover — US-125266
+## [BAU] EPQ - Triggers to reload tax lines for DLQ check after agency calendar dates changes
+
+**Date:** November 11, 2026
+**Prepared by:** Gopi K
+
+---
+
+## 1. What Changed
+
+Two SQL stored procedures only — no UI or application code involved.
+
+| # | Issue | Fix |
+|---|---|---|
+| 1 | A tax installment only got queued if it was *exactly* 20 days overdue on the day the job ran — any other day, it was skipped forever | Eligibility window widened to 20-60 days (configurable via `tbl_Config_Master`, `ConfigSystemCode='EPQ'`) |
+| 2 | No check that an installment belongs to the agency's *current* tax year before queuing it | Added a match against `lac_AgencyProfile.CURRENT_TAX_YEAR` |
+
+**Files changed:**
+- `SQL/LASTax/dbo/Stored Procedures/usp_ExceptionQueue_DataImportNew.sql`
+- `SQL/LASTax/dbo/Stored Procedures/usp_ExceptionQueue_DataImportNewIU.sql`
+
+**Deployment scripts:**
+- `SQL/Deployment-Scripts/11062026/01_US125266_AlterSp_usp_ExceptionQueue_DataImportNew.sql`
+- `SQL/Deployment-Scripts/11062026/02_US125266_AlterSp_usp_ExceptionQueue_DataImportNewIU.sql`
+
+**Minor cleanup (11/11):** the dedup guard's local variables were renamed for clarity (`@WinnerExceptionID` → `@ExistingExceptionID`, etc.) — no behavior change, naming only. The `tbl_ExceptionQueue_DedupLog` table columns (`WinnerExceptionID`/`WinnerSeqNo`) were intentionally left as-is.
+
+---
+
+## 1a. Proof — Both Original Bugs Reproduced, Then Confirmed Fixed (A/B Tested)
+
+Beyond the standard test script, both issues were additionally verified by deliberately reverting each fix in isolation on DEV, confirming the original bug reproduces, then restoring the fix and confirming it's gone:
+
+| Test | Reverted state | Result | Fix restored | Result |
+|---|---|---|---|---|
+| Gap 1 (Loan `15028805`) | Exact-day-20 match only | 0 rows — installment missed, reproducing the original bug | ✅ | 3 rows created (one per lien) |
+| Gap 2 (Loan `15019095`) | No tax-year check | Stale 2025 record silently reprocessed (`Updatedate` refreshed) despite agency's current year being 2026 | ✅ | No change — correctly blocked |
+| Gap 2, clean-slate (Loan `15029233`) | No tax-year check | Brand-new wrong-year record created from scratch | ✅ | 0 rows — correctly blocked |
+
+This is the strongest form of evidence available short of a formal regression suite — both fixes were shown to be the actual cause of the behavior change, not a coincidence.
+
+> ⚠️ **Housekeeping before handover:** two temporary, revert-only scripts were created purely for this A/B testing and must never be run against QA/Prod — `SQL/Deployment-Scripts/11062026/TEMP_ABTest_RevertGap1_usp_ExceptionQueue_DataImportNew.sql` and `TEMP_ABTest_RevertGap2_usp_ExceptionQueue_DataImportNew.sql`. Confirm DEV is currently running the real, fully-fixed procedures (see Section 3's verification query) before QA begins, and delete or clearly quarantine these two files so they're never mistaken for real deployment artifacts.
+
+---
+
+## 2. Bugs Found and Fixed During Testing
+
+Not in the original scope, but both were directly exposed once the wider 20-60 day window made the underlying conditions reachable in practice:
+
+- **Duplicate-prevention guard was installment-blind.** A pre-existing guard (from US-120627) didn't check installment number/tax year, so a genuinely new installment could get silently merged into — or suppressed in favor of — an older, different installment's still-open record for the same loan. Fixed in `usp_ExceptionQueue_DataImportNewIU` by adding TaxYear/InstallmentNo matching to the guard's business key.
+- **Non-deterministic tax-year selection.** When an agency had two different tax years simultaneously eligible (e.g., a 2025 installment still catching up and a 2026 installment also due), an unordered `SELECT` could pick either one at random — bypassing Issue 2's protection even though the eligibility check itself was correct. Fixed in `usp_ExceptionQueue_DataImportNew` by scoping that value pull to the agency's current tax year.
+
+---
+
+## 3. Deployment Status — ACTION NEEDED
+
+Both fixes are committed in the repo and the deployment scripts above are ready for a DBA to run.
+
+> ⚠️ **Before QA starts testing, confirm the two `ALTER PROCEDURE` scripts have been deployed to the QA environment.** They have been verified on DEV only (read-only verification; all writes to DEV were performed by the development team directly, not by this AI assistant, per workspace policy).
+
+Verification query (all 3 must say `PASS`):
+```sql
+SELECT
+    CASE WHEN OBJECT_DEFINITION(OBJECT_ID('dbo.usp_ExceptionQueue_DataImportNew')) LIKE '%BETWEEN @StartDays AND @EndDays%'
+         THEN 'PASS - Gap 1 live' ELSE 'FAIL' END AS Gap1Check,
+    CASE WHEN OBJECT_DEFINITION(OBJECT_ID('dbo.usp_ExceptionQueue_DataImportNew')) LIKE '%AND TEMP.CurrentTaxYear = ap.CURRENT_TAX_YEAR%'
+         THEN 'PASS - Gap 2 live' ELSE 'FAIL' END AS Gap2Check,
+    CASE WHEN OBJECT_DEFINITION(OBJECT_ID('dbo.usp_ExceptionQueue_DataImportNewIU')) LIKE '%ISNULL(ti.TaxYear, '''') = ISNULL(@TaxYear, '''')%'
+         THEN 'PASS - dedup fix live' ELSE 'FAIL' END AS DedupFixCheck;
+```
+
+---
+
+## 4. Known, Accepted Limitations (Not Bugs)
+
+- **60-day hard cutoff.** Anything missed for *more than* 60 days is still never picked up by this fix — this was a deliberate scope decision (a bounded catch-up window, not an indefinite look-back), confirmed earlier in this ticket's analysis. Do not report this as a defect.
+- **No retroactive backfill.** Installments that were already missed before this fix was deployed (including the ~6,000 found system-wide on Prod during analysis) are not retroactively created. This fix is forward-looking only, per PO confirmation.
+- **Pre-existing wrong-year records on DEV.** A handful of wrong-year queue records exist on DEV from *before* the 11/11 fix (e.g., Agency 210010203/210010205, created 2026-11-10 ~08:53). These are old data, not retroactively cleaned up — expected, not a new defect if QA notices them.
+
+---
+
+## 5. How to Demo / Test
+
+Use [`03_US125266_TEST_Simple.sql`](../Scripts/US-125266/03_US125266_TEST_Simple.sql) — plain-English, no SQL expertise needed beyond running a query and reading a number.
+
+**Issue 1 demo:**
+1. Run the headline count query — shows how many loans are currently stuck in the old "missed forever" gap.
+2. Trigger the job (ask DEV/DBA support), or use the safe, self-undoing test run at the bottom of the script.
+3. Re-run the same query — the count should drop, because those loans now have a queue entry.
+
+**Issue 2 demo:**
+1. Run the `IncorrectlyQueuedCount` query — note the number (may be non-zero already, see Section 4).
+2. Trigger the job again.
+3. Re-run the same query — the count should **not increase**. A flat number before/after proves no new wrong-year record was created, even for agencies with two tax years eligible at once.
+
+---
+
+## 6. Reference Documents
+
+- [US-125266_HighLevel.md](US-125266_HighLevel.md) — plain-language what/why/what-changed, suitable for attaching to the ticket.
+- [US-125266_Detailed.md](US-125266_Detailed.md) — full technical detail and test scenarios table.
+- [01_US125266_TEST.sql](../Scripts/US-125266/01_US125266_TEST.sql) — full technical test script, including deployment verification (`OBJECT_DEFINITION` checks) for anyone who wants to confirm the SP text itself, not just behavior.
+- [03_US125266_TEST_Simple.sql](../Scripts/US-125266/03_US125266_TEST_Simple.sql) — the QA-facing demo/test script referenced above.

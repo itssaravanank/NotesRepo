@@ -1,0 +1,89 @@
+Dispatcher payload :
+
+{
+  "CorrelationId": "ac866241-4f49-4f05-a7a9-1b53dbb56ffa",
+  "Items": [
+    {
+      "SourceSystem": 3,
+      "SourceUniqueId": "DIR-249748-1",
+      "TriggerConditionID": 19,
+      "TaxIdFormatted": "16114100150",
+      "TaxIdUnformatted": "16114100150",
+      "ClientNumber": "83470",
+      "CustomerNumber": "83470",
+      "ContractId": "95515624",
+      "LoanNumber": "1033",
+      "AgencyId": "100330101",
+      "TaxYear": 2026,
+      "Frequency": "Annual",
+      "Installment": "1",
+      "BpoAgency": "         ",
+      "BorrowerName": "HOT WHEELS IMPORT COLLISION, INC",
+      "CoBorrowerName": "HOT WHEELS IMPORT COLLISION, INC",
+      "PropertyAddress": "847 BARNES MILL RD, MARIETTA, GA 30062",
+      "MailingAddress": "",
+      "PreviousOwnerName": "                                    ",
+      "ContractIssueDate": "2019-06-07T00:00:00",
+      "ServiceType": "B",
+      "LegalDescription": "",
+      "ClosingDate": null,
+      "AllowZeroAmount": false,
+      "LienSequenceNumber": "0002",
+      "ParcelOrAccountNumber": "16114100150",
+      "CorrelationId": "8addc3bb-2404-4dcb-baa3-e6b0eb54a523",
+      "SpecialConditionCode": "",
+      "AmountDue": null,
+      "BaseAmount": null,
+      "AsofDate": null,
+      "GoodThruDate": null,
+      "PaymentOptionIndicator": " "
+    }
+]
+}
+
+
+Receiver Payload
+{
+  "correlationId": "273350dd-4e5a-47cd-9cad-b8ffc8eb162b",
+  "sourceUniqueId": "COP-65304018-1",
+  "taxLines": [
+    {
+      "year": "2026",
+      "installment": "2",
+      "amountDue": 42.5,
+      "penaltiesAndInterest": 0,
+      "goodThruDate": "",
+      "goodThruDate2": "",
+      "balanceDue2": 0,
+      "paymentCode": 0,
+      "specialCondition": "&",
+      "billNumber": "",
+      "baseAmount": 42.5,
+      "asOfDate": "2026-10-12",
+      "leretaLiability": "N",
+      "notes": "All prior year taxes paid",
+      "paymentOptionIndicator": "",
+      "checkType": "",
+      "eldDate": ""
+    },
+    {
+      "year": "2026",
+      "installment": "1",
+      "amountDue": 0,
+      "penaltiesAndInterest": 0,
+      "goodThruDate": "",
+      "goodThruDate2": "",
+      "balanceDue2": 0,
+      "paymentCode": 1,
+      "specialCondition": "",
+      "billNumber": "",
+      "baseAmount": 47.56,
+      "asOfDate": "2026-10-12",
+      "leretaLiability": "N",
+      "notes": "All prior year taxes paid",
+      "paymentOptionIndicator": "",
+      "checkType": "",
+      "eldDate": ""
+    }
+  ]
+}

@@ -1,0 +1,114 @@
+## Open questions
+
+**Scope and data**
+
+Q1. Both reports already show Loan ID, so is State ID the only new report column?
+- Context: Installment Research already has "Loan ID" as column 1 (and "Additional Loan ID" as column 14). Monthly Updates already returns `LoanID` (sort position 9). AC4 and AC5 list Loan ID as something to add.
+- Impact: This sets the report change. Anything beyond State ID needs a different Loan ID column or relabel.
+- Suggested: add State ID only and leave Loan ID unchanged.
+- Status: ⏳ Pending
+
+**UI on the DIR, DMU and TSP tabs**
+
+Q2. Where should the new controls sit on each tab?
+- Context: DIR has one row of 3 dropdowns (Agency, Lender, Customer). DMU has 4 (adds Month). TSP has 3 plus the "Add Tax Sales" button.
+- Impact: Page layout cannot be built without this.
+- Suggested: a second row under the existing one on all three tabs, holding the State ID dropdown, a Loan ID textbox, and the buttons from Q3.
+- Status: ⏳ Pending
+
+Q3. Which buttons go with the Loan ID textbox: Search only, or Search and Clear?
+- Context: Existing dropdowns post back on change, but a textbox needs a trigger. Add Tax Sales pairs its Loan ID textbox with Submit and Clear buttons.
+- Impact: Which controls and postback wiring to build.
+- Suggested: Search plus Clear. Enter submits, and Clear resets only State ID and Loan ID.
+- Status: ⏳ Pending
+
+Q4. Should Loan ID match exactly or partially?
+- Context: The EPQ precedent `Usp_ExceptionQueue_getcontract_information_s` matches exactly. `tbl_ExceptionQueue.LoanID` is `varchar(21)`, and the DIR list displays it trimmed.
+- Impact: The WHERE clause in the three list procedures. Partial matching can also affect performance.
+- Suggested: exact match on the trimmed value.
+- Status: ⏳ Pending
+
+Q5. What text should the State ID dropdown show?
+- Context: The other dropdowns on these tabs show "ID - Name". The EPQ admin pages show the state name only. The value is the 2-letter code either way.
+- Impact: The dropdown procedure's text column and the binding.
+- Suggested: "PA - PENNSYLVANIA", with "All" first.
+- Status: ⏳ Pending
+
+Q6. Which states should the dropdown list?
+- Context: The options are (a) states with open items on that tab for the user, (b) all states assigned to the user in `tbl_ExceptionQueue_Assign_States`, or (c) all states. The Agency, Lender and Customer lists are built from open items.
+- Impact: The new State query in `usp_ExceptionQueue_BindDropDown_Sel`.
+- Suggested: (a).
+- Status: ⏳ Pending
+
+Q7. Should State ID cascade with Agency, Lender and Customer, or be an independent filter?
+- Context: Today Agency, then Lender, then Customer cascade through `bindLenders()` and `bindCustomers()`. With an independent filter, a State and Agency that do not match show "No data to display".
+- Impact: A cascade adds a State parameter to the dropdown procedure, its DAL/BLL/Host call and all three pages' handlers, which is a much larger change.
+- Suggested: independent.
+- Status: ⏳ Pending
+
+Q8. Should the State ID and Loan ID selections persist?
+- Context: Agency, Lender, Customer and Month are kept in session (`ESQAgencyID`, `ESQLenderID`, `ESQCustID`, `ESQMonth`) and restored on page load. All six EPQ list tabs share those keys.
+- Impact: Without persistence, returning from a Details page resets the filtered list. Shared keys would carry a Loan ID filter from one tab to the others.
+- Suggested: persist and share across tabs like the existing three filters. The alternatives are not persisted at all, or persisted per tab only.
+- Status: ⏳ Pending
+
+Q9. What should show when the State or Loan filter returns no rows?
+- Context: The story is silent. All three tabs show "No data to display" when the grid is empty. Add Tax Sales shows "No data found."
+- Impact: The message text.
+- Suggested: reuse "No data to display".
+- Status: ⏳ Pending
+
+Q10. Should State ID also appear as a grid column?
+- Context: The DIR procedure already returns `StateID` but the grid hides it. DMU and TSP will return it, because Download exports every returned column.
+- Impact: Grid column, position and width on three pages.
+- Suggested: no new column, since the story only asks for filters. Download will include it.
+- Status: ⏳ Pending
+
+**SSRS reports**
+
+Q11. Where should State ID sit in each report?
+- Context: Installment Research runs Loan ID (1) to Additional Loan ID (14). Monthly Updates uses fixed `SortOrder` values 1–24 and 26–45, with no free slot after `LoanID`. The story lists "Loan ID, State ID" for Installment and "State ID, Loan ID" for Monthly.
+- Impact: Column order in the RDL and the procedure. Inserting mid-report shifts columns for customers who read the Excel files by position (see Q13).
+- Suggested: append at the end of both reports. The alternative is directly after Loan ID.
+- Status: ⏳ Pending
+
+Q12. What header text should the new column use?
+- Context: Installment headers are spaced words ("Loan ID"). Monthly headers come from the procedure alias (`LoanID`, but also "Agency Name"). The Monthly procedure drops an EPQ column whose name equals an active customer custom data field label. DEV has none (only "Mailing State"); PROD is unchecked.
+- Impact: The alias in the Monthly procedure and the header in the RDL.
+- Suggested: "State ID" in both.
+- Status: ⏳ Pending
+
+Q13. Is it acceptable that customers receive the new column in their emailed Excel files?
+- Context: Two enabled SQL Agent jobs, "Export Installment Research Customer Report" and "Export Monthly Updates Customer Report", render both reports to Excel and email them per customer. The SSIS packages are `LAS_Export_InstallmentResearch_CustomerReport` and `LAS_Export_MonthlyUpdates_CustomerReport`. The PROD schedule is not verified.
+- Impact: Release coordination or a customer notice, and the Q11 position choice.
+- Suggested: accept it with no SSIS change, since the packages call the reports by name with CustID, FromDate and ToDate.
+- Status: ⏳ Pending
+
+Q14. Should State and Loan also become report parameters?
+- Context: The Reports page (`ExcpetionQueueReports.aspx.cs`) and both SSIS packages pass only CustID, FromDate and ToDate. The last scope bullet says "filtering, searching, reporting, and export", but AC4–6 mention columns only.
+- Impact: If yes, I add optional parameters to the RDL and procedure (defaulted so the SSIS URLs keep working), new inputs on the Reports page, and more testing.
+- Suggested: no, columns only.
+- Status: ⏳ Pending
+
+**Delivery**
+
+Q15. Which release date folder should the deployment scripts go into?
+- Context: Scripts go in `SQL/Deployment-Scripts/<MMDDYYYY>/`. The latest existing folder is `11242026`, and no release date was given.
+- Impact: Final script paths for the six procedure scripts.
+- Suggested: tell me the date. If none, I will use `11252026`.
+- Status: ⏳ Pending
+
+## Assumptions
+
+- **A1.** "State ID" means `tbl_ExceptionQueue.StateID` (the 2-letter code, for example PA). This is the same value that already gates each list through `tbl_ExceptionQueue_Assign_States`. No table changes.
+- **A2.** The new filters run in SQL together with Agency, Lender and Customer (AND), not through the grid's in-memory "Show Filters". They also apply to the DMU Worked and Current+1 months, and Download exports the filtered set.
+- **A3.** The State dropdown lists only states the logged-in user is assigned to. "All" is the default.
+- **A4.** Loan ID is a single trimmed value of at most 21 characters, with no wildcards or comma lists, passed as a SQL parameter.
+- **A5.** Only the DIR, DMU and TSP tabs change. Follow-Up, QC, Completed, Admin and Reports are untouched.
+- **A6.** Only the .NET Remoting path changes (`Tax.cs`, `ExceptionQueueBLL`, `ExceptionQueueDAL`). `TaxServiceCore` and `TaxApiClient` stay as they are. New procedure parameters default to ALL or blank, and new Host arguments are optional, so a Web/Host version mismatch during deployment does not break.
+- **A7.** `usp_ExceptionQueue_BindDropDown_Sel` gets a State result set appended for DIR, DMU and TSP only. The existing `Tables[0..3]` stay unchanged for all six screens.
+- **A8.** The Installment Research RDL gets a new column. The Monthly Updates RDL does not change, because its columns are dynamic. The team redeploys the RDLs to `/Tax Reports` manually.
+- **A9.** The story's `ExProcessQueuelnstallmentResearch` means `ExProcessQueueInstallmentResearch`.
+- **A10.** SQL deliverables follow the repo conventions: six `AlterSp` scripts with the repo `.sql` files updated, plus a QA test script at `Documents/LERETANet/Scripts/US-138416/`. DEV test data is sufficient, so there are no blockers.
+
+Reply by question number, or say "defaults" to accept every suggested default. I will then re-offer B, C and D; an answer alone is not an implementation go-ahead.

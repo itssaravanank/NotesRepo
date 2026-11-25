@@ -1,0 +1,14 @@
+
+**Open Questions — US-139113 (EPQ ELD Date Change → MPS Sync)**
+
+**1. There's no "Closed" status in the system today — can we mark the task as Completed instead, with a note explaining it was auto-closed?**
+Suggestion: We recommend marking it Completed with a comment such as "Auto closed due to ineligibility," since Completed is the only end-state the system supports today. Agree?
+
+**2. How should we tell the outside procurement team (MPS) to close their copy of a task we've auto-closed?**
+Suggestion: We recommend reusing the same "remove this task" message already used today for similar cancellations, rather than building a new message type. This assumes the outside team handles that message the same way for this task type — worth a quick confirmation with them before we build it.
+
+**3. Should this also fix tasks that are already stuck/ineligible today, or only new cases going forward?**
+Suggestion: A related earlier change was told not to touch existing records, only new activity going forward. If that same rule applies here, we'd only close tasks that become ineligible after this ships, and treat any already-stuck older tasks as a separate decision. Please confirm whether that still holds, or whether this story should also clean up the existing backlog.
+
+**4. Does the outside team need to be notified the same moment we close a task, or is it OK if that happens on the next regular scheduled run?**
+Suggestion: We recommend the next regular scheduled run (not instant), consistent with how a similar timing question was answered on a related earlier change. Agree?

@@ -1,0 +1,55 @@
+# High-Level Analysis — US-125266
+## [BAU] EPQ - Triggers to reload tax lines for DLQ check after agency calendar dates changes
+
+**Date:** November 3, 2026
+**Story:** US-125266
+**Module:** Business Tools — Exception Processing Queue (Delinquent Installment Search / DIR)
+
+---
+
+## 1. What
+
+Two bug fixes to the nightly job that creates "Delinquent Installment Search" (DIR) tasks when a property tax installment becomes overdue. This is a backend/SQL-only fix to the existing nightly process — no new screens, buttons, or day-to-day workflow changes.
+
+---
+
+## 2. Why
+
+Today's eligibility check only looks for "exactly 20 days overdue" on one single day — if that exact day is missed, the installment never gets a task, with no retry. Verified live: Agency 370020000 / Loan 15016876's 2026 installment is 187+ days overdue with zero task ever created, despite a task being created correctly for 5 straight prior years (2021-2025) for this exact same loan. Separately, once a task exists, later changes to the underlying key date don't refresh it — due dates stay frozen at creation, even years later. And there is currently no check anywhere in the process for whether an installment belongs to the *current* tax year before a task is created.
+
+---
+
+## 3. What Changes
+
+- The "exactly 20 days" check becomes "20 or more days, up to a configured cutoff," so it reliably catches installments the system missed, instead of requiring a precise one-day hit.
+- If a loan's key date genuinely changes after a task already exists, that existing task (open or completed) gets its relevant date fields refreshed instead of being silently ignored.
+- A new check will only allow brand-new tasks to be created for the *current* tax year — the exact definition is still pending (see Open Questions).
+
+---
+
+## 4. What Stays the Same
+
+- No screens/UI changes — the existing Delinquent Installment Search queue screen works exactly as it does today.
+- Delinquency Monthly Updates (DMU) and Tax Sales Procurement (TSP) queues are unaffected — confirmed their eligibility logic doesn't depend on this calendar check at all.
+- No retroactive fix for installments already missed in the past (e.g., Allegheny's 2026 gap, or the ~6,000 similar cases found system-wide) — those remain visibility/reporting only, per PO confirmation. This fix is forward-looking only.
+- The existing duplicate-prevention guard (from US-120627) stays in place — this story only adds a narrow carve-out for genuine date changes, it does not remove or weaken the guard.
+
+---
+
+## 5. Expected Outcome
+
+After this fix:
+- A newly-overdue installment reliably gets a task on the next nightly run, even if the system missed its exact 20-day mark.
+- If an installment's key date changes after a task already exists, that task's dates refresh to match (fully for open tasks; the key date only for completed ones).
+- New tasks are only created for the current tax year, once the definition below is confirmed.
+
+Confirmed via a live, controlled test on DEV (2026-11-03): a test case (Agency 010370000 / Loan 0000145089) correctly created a brand-new task the moment its calendar date was set to exactly 20 days overdue and the job was re-run — proving the underlying creation mechanism itself works correctly today. The two gaps above are what stand between "works on the one exact day" and "works reliably."
+
+---
+
+## 6. Open Questions
+
+**Q1.** How should "current tax year" be determined for an installment?
+&nbsp;&nbsp;&nbsp;&nbsp;Context: Three independently reasonable definitions were tested against the entire system and all failed (53%-67% mismatch rates): the latest year on file per agency, the agency's own recorded "current year" field, and plain calendar year. A fourth candidate — the Lead's own suggestion (a calendar status flag, refined to only the milestones that drive this eligibility check) — reaches a 72.1% system-wide match, the best found so far, and correctly resolves this ticket's own motivating example (Allegheny).
+&nbsp;&nbsp;&nbsp;&nbsp;Impact: Blocks writing the current-tax-year validation itself (the second of the two fixes above). The first fix (catch-up window + refreshing existing tasks) does not depend on this answer and can proceed independently.
+&nbsp;&nbsp;&nbsp;&nbsp;Status: ⏳ Pending — sent to the Lead for review, no reply yet.

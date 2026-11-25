@@ -1,0 +1,33 @@
+**SQL Job Name:** `LAS_ExceptionProcessQueue_DataImportNew`
+
+When the job runs, it checks `LASTotalTaxSolution.dbo.lais_PayeeCalendar` for every `PayeeID + CurrentTaxYear + Installment` combination, comparing each row's `DueDate` against today. If it currently falls between 20 and 60 days overdue (bounds configurable here):
+
+```sql
+SELECT ConfigSystemCode, ConfigKey, ConfigValue
+FROM [LASCommon].[dbo].[tbl_Config_Master] WITH (NOLOCK)
+WHERE ConfigSystemCode = 'EPQ' AND ConfigKey IN ('StartDays', 'EndDays');
+```
+
+it then looks up every loan tied to that agency in `LASTax.dbo.Lat_LienMasterKey`, along with a few other eligibility checks (lender/state research configuration, cancelled-contract status, agency "Late_Rels" flag), and either creates a new DIR item for each eligible loan, or — if one already exists and is still open — updates its due date in place.
+
+****Scenario 1 :****
+
+**Before our change:** a DIR item was only created if the installment was overdue by *exactly* 20 days on the day the job happened to run — any other day, it was permanently skipped.
+
+**After our change:** anything between 20 and 60 days overdue gets picked up. (anything later than that is still never picked up as per config.)
+
+****Scenario 2 :****
+
+**Before our change:** there was no check that the installment's tax year matched the agency's current tax year.
+
+Example : Loan under Agency, That agency's current tax year is 2026. But this loan has an old installment from 2025. Once that 2025 installment's calendar entry had stayed sitting with a due date that looked overdue by the right amount (20-60 days), the day-count math alone said "yes, create a task" — with no concept of "but this is last year's cycle, not this year's."
+
+**After our change:** we additionally require the installment's tax year to equal the agency's current tax year before creating anything:
+
+```sql
+SELECT ap.AGENCY_ID, ap.CURRENT_TAX_YEAR AS AgencyCurrentYear, pc.CurrentTaxYear AS InstallmentYear,
+       CASE WHEN pc.CurrentTaxYear = ap.CURRENT_TAX_YEAR THEN 'MATCH' ELSE 'MISMATCH' END AS Result
+FROM [LASTotalTaxSolution].dbo.lais_PayeeCalendar pc WITH (NOLOCK)
+INNER JOIN [LASCommon].dbo.lac_AgencyProfile ap WITH (NOLOCK) ON ap.AGENCY_ID = pc.PayeeID
+WHERE pc.PayeeID = '<AgencyID>';
+```

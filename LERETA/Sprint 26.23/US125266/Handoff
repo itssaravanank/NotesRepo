@@ -1,0 +1,92 @@
+# Process Handoff Note — EPQ / DIR Exception Queue Pipeline
+## Context: US-125266
+
+This explains the end-to-end flow this ticket's fixes live inside, every table involved, and
+exactly where the two fixes (and the two extra bugs found) sit in that flow. Scope note at the
+bottom marks what's verified in detail vs. known-but-not-fully-traced.
+
+---
+
+## 1. Business purpose
+
+A nightly SQL Agent job scans every loan's property tax calendar. When a tax installment becomes
+overdue, it creates a "research task" (an **Exception Queue** item) so a tax analyst can follow up.
+There are 3 kinds of task (`SystemCode`): **DIR** (Delinquent Installment Research — this ticket's
+focus), **DMU** (Delinquency Monthly Updates), **TSP** (Tax Sale Procurement).
+
+---
+
+## 2. Entry point
+
+SQL Server Agent job **`LAS_ExceptionProcessQueue_DataImportNew`** → calls stored procedure
+**`[LASTax].[dbo].[usp_ExceptionQueue_DataImportNew]`** (no parameters). That procedure calls
+**`[LASTax].[dbo].[usp_ExceptionQueue_DataImportNewIU]`** once per eligible system code, per staging row.
+
+---
+
+## 3. End-to-end flow
+
+```mermaid
+flowchart TD
+    A[SQL Agent job runs] --> B[usp_ExceptionQueue_DataImportNew]
+    B --> C["Build #tbl_DLQ_Installment_Research<br/>(pivot lais_PayeeCalendar ELD dates,<br/>apply 20-60 day catch-up window - Gap 1)"]
+    C --> D["Truncate + repopulate tbl_ExceptionQueue_Staging<br/>(join Lat_LienMasterKey, lat_ContractMasterKey,<br/>tbl_ExceptionQueue_Assign_ExceptionService,<br/>lac_CustomerProfile, lac_AgencyProfile)"]
+    D --> E[Cursor over every staging row]
+    E --> F{CancelCode = 'C'?}
+    F -->|Yes| G[usp_ExceptionQueue_AutoCompleted_Upd<br/>- separate auto-close path]
+    F -->|No| H["Eligibility check: does agency have an<br/>installment matching ES config AND<br/>CurrentTaxYear = agency's CURRENT_TAX_YEAR? - Gap 2"]
+    H -->|Yes| I["Pull @DIRTaxYear/@DIRInstallmentNo/@DIRDueDate<br/>- scoped to CurrentTaxYear = CURRENT_TAX_YEAR<br/>(fixed 11/11, was non-deterministic)"]
+    I --> J[EXEC usp_ExceptionQueue_DataImportNewIU<br/>once per DIR/DMU/TSP flag that fired]
+    J --> K["Dedup guard (US-120627 + 11/10 fix):<br/>does an OPEN record already exist for this<br/>exact LoanID+AgencyID+TaxID+PropertyID+LienSEQ<br/>+SystemCode+TaxYear+InstallmentNo?"]
+    K -->|Yes, due date changed, DIR only| L[Carve-out: update in place,<br/>audit note, RETURN]
+    K -->|Yes, no change| M[Suppress: log to DedupLog, RETURN]
+    K -->|No match| N["Legacy exact-match check on<br/>tbl_ExceptionQueue itself<br/>(TaxYear+InstallmentNo+Lender+Cust+Contract+...)"]
+    N -->|Exists, any completion status| O[Archive old row, update wide columns<br/>in place - legacy path, not modified this ticket]
+    N -->|Does not exist| P[Insert brand-new ExceptionQueue /<br/>UserTracking / Tax_Info rows - not traced<br/>line-by-line this session]
+```
+
+---
+
+## 4. Tables used — full list
+
+| Database | Table | Role |
+|---|---|---|
+| `LASTotalTaxSolution` | `lais_PayeeCalendar` | Source of truth for ELD (Estimated Last Date) due dates per agency/tax-year/installment. Columns: `PayeeID`, `CurrentTaxYear` *(the installment's own year — not the agency's)*, `Installment`, `RunCode` (`ELDH`/`ELDX`/`ELD0` — "latest wins" tie-break), `DueDate`. |
+| `LASCommon` | `tbl_Config_Master` | Holds `StartDays`/`EndDays` (`ConfigSystemCode='EPQ'`) — the catch-up window bounds. |
+| `LASCommon` | `lac_AgencyProfile` | `CURRENT_TAX_YEAR` — the agency's actual active tax year (Gap 2's comparison target). Also `Late_Rels` (`'U'` = excluded). |
+| `LASCommon` | `lac_CustomerProfile` | Customer name lookup when building staging rows. |
+| `LASTax` | `Lat_LienMasterKey` | One row per lien (TaxID+PropertyID+LienSEQ) per loan. `LenderID`, `Statecode`, `TaxServiceType` (`'B'` required), `PayeeID`. A loan can have multiple liens → multiple queue rows per loan is normal. |
+| `LASTax` | `lat_ContractMasterKey` | Contract-level data; `LCR_CANCEL_CODE` (`'C'` = cancelled, routes elsewhere entirely). |
+| `LASTax` | `tbl_ExceptionQueue_Assign_ExceptionService` | Per Lender+State config; `DLQResearchInd='1'` required for DIR eligibility. Sparse on DEV. |
+| `LASTax` | `tbl_ExceptionQueue_Staging` | Truncated and rebuilt every run; one row per loan+lien combination currently in scope. Cursor source for the main processing loop. |
+| `LASTax` | `tbl_ExceptionQueue` | The parent queue table. Also still carries some legacy "wide" columns (`TaxYear`, `InstallmentNo`, `DLQResearchInd`, etc.) used by an older code path alongside the newer child tables below. |
+| `LASTax` | `tbl_ExceptionQueue_UserTracking` | Child table: `SystemCode`, `SeqNo`, `isComplete` — one row per system code per exception. |
+| `LASTax` | `tbl_ExceptionQueue_Tax_Info` | Child table: `TaxYear`, `InstallmentNo`, `InstallmentDueDate`, `SLADueDate`, `Updatedate` — the newer, normalized per-installment detail. |
+| `LASTax` | `tbl_ExceptionQueue_DedupLog` | Audit log of suppressed duplicate attempts (`WinnerExceptionID`/`WinnerSeqNo` columns — kept as-is despite the local variable rename). |
+| `LASTax` | `tbl_ExceptionQueue_Archive` | Snapshot of a queue row's wide columns taken right before the legacy exact-match path updates it in place. |
+
+---
+
+## 5. Where this ticket's changes live
+
+| Change | Procedure | What |
+|---|---|---|
+| Gap 1 — catch-up window | `usp_ExceptionQueue_DataImportNew` | `#tbl_DLQ_Installment_Research` population: `BETWEEN @StartDays AND @EndDays` (was `= @StartDays`) |
+| Gap 2 — tax-year validation | `usp_ExceptionQueue_DataImportNew` | Eligibility `EXISTS` check: added `TEMP.CurrentTaxYear = ap.CURRENT_TAX_YEAR` |
+| Non-determinism fix (found during testing) | `usp_ExceptionQueue_DataImportNew` | `@DIRTaxYear`/`@DIRInstallmentNo`/`@DIRDueDate` pull: same year-scoping added, so it can't grab a different year's row than the eligibility check just validated |
+| Dedup guard installment-blindness fix (found during testing) | `usp_ExceptionQueue_DataImportNewIU` | Guard's matching `SELECT`: added `TaxYear`/`InstallmentNo` to the business key (previously only Loan+Agency+TaxID+PropertyID+LienSEQ+SystemCode) |
+| DIR carve-out (11/06) | `usp_ExceptionQueue_DataImportNewIU` | New block inside the guard's `IF @ExistingExceptionID IS NOT NULL`: update in place instead of suppress, when the due date genuinely changed |
+| Variable rename (11/11, cosmetic) | `usp_ExceptionQueue_DataImportNewIU` | `@Winner*` → `@Existing*` local variables only |
+
+---
+
+## 6. Scope note — what's verified vs. not
+
+Everything above Section 5, and the guard/carve-out/suppress logic in Section 3, was read and
+verified directly during this session (including live replay against real DEV data). The
+**legacy exact-match path** (Section 3, boxes N/O/P — the `tbl_ExceptionQueue`-wide-column archive
+mechanism) was read just now while preparing this note, but **was not modified, deeply tested, or
+fully traced line-by-line** as part of this ticket — it predates US-120627 and this ticket
+entirely, and nothing in this ticket's scope required changing it. Treat this handoff as
+comprehensive for everything this ticket touched; treat the legacy archive path as "known to exist,
+not fully audited" if a future ticket needs to change it.

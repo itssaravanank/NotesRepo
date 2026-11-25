@@ -1,0 +1,187 @@
+# High-Level Analysis — US-136572
+## [CR] [EPQ] MPS Inbound and Outbound — New Fields
+
+**Date:** November 19, 2026
+**Story:** US-136572
+**Application:** LeretaNetMPSAPI (Manual Procurement Queue API) and the LASTax / LASOutsourcing databases
+**Scope:** Exception Processing Queue items sent to MPS — DIR and DMU
+**Status:** Analysis only. Nothing has been implemented. The payload format from Common Services is still a draft, so the field names below can change.
+
+---
+
+## 1. Overview
+
+### What the story asks for
+
+Today, when an Exception Processing Queue (EPQ) task is sent to the Manual Procurement service (MPS), four values that processors work with are not part of the message. The story adds them in both directions:
+
+| Field | Sent to MPS (outbound) | Received back from MPS (inbound) |
+|---|---|---|
+| Bill Number | New | Already works today |
+| P&I (penalties and interest) | New | Already works today |
+| Payment Status | New | Already works today |
+| Follow-up Date | New | New |
+
+### Terms used in this document
+
+- **Outbound** — our API sends a task to MPS.
+- **Inbound** — MPS sends the finished task back to our API, and we save the values to the EPQ.
+- **Task's own record** — the tax year and installment the task was raised for (the "Details" block on the EPQ screen).
+- **Prior installment lines** — the rows in the Delinquency / Prior Information panel on the EPQ screen, one per tax year and installment.
+
+### Expected outcome
+
+- MPS processors see the Bill Number, P&I, Payment Status and Follow-up Date that LERETA already holds for a task.
+- When MPS returns a task, the Follow-up Date it sends is saved on the EPQ task, in addition to the three values that are already saved today.
+- A task that has none of these values is still sent to MPS as it is today.
+
+### Problem being addressed
+
+MPS processors currently have to work without information LERETA already has, and a follow-up date entered in MPS is lost when the task comes back.
+
+---
+
+## 2. Solution
+
+### 2.1 What will change, in plain words
+
+**Sending to MPS (outbound)**
+
+- Each task sent to MPS will carry the four new values.
+- Bill Number, P&I and Payment Status are sent **per installment**: once for the task's own record, and once for every prior installment line. This follows the PO's answer that P&I and Bill Number exist on the prior installments and must be pushed for each of them.
+- Follow-up Date is held once per task, so it is sent on the task's own record only.
+- When a value does not exist, it is sent as empty (`null`). The task is still sent.
+
+**Receiving from MPS (inbound)**
+
+- Bill Number, P&I and Payment Status coming back from MPS are already saved to the EPQ today. No change is needed; they will be verified by tests.
+- Follow-up Date is new. When MPS sends it, we save it on the task.
+- The task is still completed, exactly as today. MPS only sends back completed tasks, so a follow-up date does not move the task into Follow-Up status.
+
+### 2.2 Where each value comes from and goes to
+
+| Field | Outbound: task's own record | Outbound: prior installment lines | Inbound: saved to |
+|---|---|---|---|
+| Bill Number | The task's "Bill No." field (the DIR screen has it; the DMU screen does not, so for DMU it is normally empty) | The Bill No. of that installment line | Already saved today (task record and installment line) |
+| P&I | Empty — the task's own record has no P&I. If the panel has a line for the same tax year and installment, that line's P&I is used | The P&I of that installment line | Already saved today (installment line) |
+| Payment Status | Paid → `1`, Delinquent → `0`, anything else → empty | The payment code of that installment line (`1` / `0`), empty when blank | Already saved today (task record and installment line) |
+| Follow-up Date | The task's follow-up date. If the task has none, the most recent follow-up date from the task's follow-up notes | Not sent (held per task only) | **New:** the task's tracking record, plus a history entry |
+
+### 2.3 Decisions already made
+
+| Topic | Decision | From |
+|---|---|---|
+| Scope | DIR and DMU only | Developer / story |
+| Inbound follow-up date and task status | The task is completed regardless of the follow-up date | PO / Lead |
+| Where the inbound follow-up date is saved | On the task's tracking record with a history entry; no follow-up note is created | Developer (to be confirmed by PO / Lead) |
+| Outbound follow-up date source | Task's follow-up date first, otherwise the latest follow-up note date | Developer (to be confirmed by PO / Lead) |
+| Outbound Payment Status values | `0` / `1` or blank | PO / Lead (MPS accepts these) |
+| Outbound P&I | Not on the current record; sent on each prior installment | PO / Lead |
+| Outbound Bill Number | Current record's bill number when it has one, and each prior installment's bill number | PO / Lead |
+
+### 2.4 Open points
+
+| # | Open point | Waiting on | What we will do if there is no answer |
+|---|---|---|---|
+| 1 | Final field names and structure of the outbound payload (the draft uses `billNumber`, `penaltiesAndInterest`, `paymentStatus`, `followUpDate` inside an `installments` list) | Common Services | Cannot start the outbound part without it |
+| 2 | Inbound message: where `followUpDate` sits, its format, and whether MPS sends `null` or leaves it out | Common Services | Suggested: top level of the message, `YYYYMMDD` |
+| 3 | Will the inbound message (`taxLines`) change to match the new outbound structure? | Common Services | Assume no change |
+| 4 | Bill Number longer than 10 characters (the database allows 50; none is longer than 10 in DEV today) | PO / Lead | Send the first 10 characters and log it |
+| 5 | Payment Status is a text field in the draft. Confirm `"1"` / `"0"` and `null` | Common Services | Send as in this document |
+| 6 | Follow-up Date is on every installment in the draft. Confirm it is filled on the task's own record only, and the date format | Common Services | Task's own record only |
+| 7 | When the panel has a line for the task's own tax year and installment, use that line's P&I on the task's own record? | PO / Lead | Yes, use it |
+| 8 | When MPS sends no follow-up date, keep the date already stored on the task? | PO / Lead | Keep the stored date |
+| 9 | Inbound Bill Number, P&I and Payment Status already work — is verification by tests enough for acceptance criteria 5a to 5c? | PO / Lead | Verification only |
+
+### 2.5 Dependencies and release
+
+- **Depends on US-138600.** The per-installment values travel in the list of installments that US-138600 adds to the payload. The two stories must be built and released together.
+- **MPS must be ready.** The payload is a contract with MPS. Our release and theirs have to be coordinated.
+- **Order of deployment:** database first, then the API.
+
+### 2.6 What stays the same
+
+- The way tasks are picked up, sent, retried and dead-lettered.
+- The inbound handling of Bill Number, P&I and Payment Status.
+- The EPQ screens in LERETANet. No screen changes.
+- Completion of a task when MPS returns it.
+
+---
+
+## 3. Technical Details
+
+### 3.1 Flow reference
+
+- **Outbound:** `DispatcherQuartzJob.Execute` or `GET /api/Dispatcher` → `ProcurementService.GetAllEPQOutboxOrids` → `ProcurementRepository.GetAllEPQOutboxListByIds` (builds the payload) → validation → MPS import endpoint.
+- **Inbound:** `POST /api/Receiver` → `InboundAcceptanceService.AcceptAsync` (saves to the inbox) → `InboxProcessor` → `EPQHandler` → `ProcurementService.ExecuteEpqLoanDetailsAsync` → `MapToEpqRequest` → `ProcurementRepository.ExecuteExceptionQueueLoanDetailsUpdAsync` → `usp_ExceptionQueue_Loan_Details_Upd`.
+
+### 3.2 Impacted components
+
+| Component | Item | Change |
+|---|---|---|
+| MPS contract (outbound) | Installment line of the import payload | Four optional fields: bill number, P&I, payment status, follow-up date. Names per the final Common Services format |
+| MPS contract (inbound) | `CsInboundMessage` | New optional `followUpDate` |
+| API — DTO | `ManualProcurementQueueAPI.Common/DTOs/MpqOutboundPayload.cs` | Four optional properties on the installment line. No "required" rule, so a missing value never sends the task to dead letter. Bill Number limited to 10 characters |
+| API — DTO | `ManualProcurementQueueAPI.Common/DTOs/CsInboundMessage.cs` and the EPQ update request DTO | New follow-up date property |
+| API — repository (outbound) | `ProcurementRepository.GetAllEPQOutboxListByIds` | Map Payment Status and Bill Number from the tax-info table (already joined), Follow-up Date from the user-tracking table (already joined) with a fallback to the follow-up notes table, and P&I / Bill Number per installment line from the tax-year-info table |
+| API — repository (inbound) | `ProcurementRepository.ExecuteExceptionQueueLoanDetailsUpdAsync` | Pass the new `@FollowUpDate` parameter |
+| API — service (inbound) | `ProcurementService.MapToEpqRequest` | Read `followUpDate` from the message using the existing date parser; an invalid date is ignored with a warning and the rest of the message is still saved |
+| API — entities | `LasoutsourcingContext` | New entity and `DbSet` for the follow-up notes table (the tax-year-info entity comes with US-138600) |
+| API — endpoints, scheduled job, inbox handler | — | No change to routes, schedule or flow |
+| API — configuration | `appsettings*.json` | No new keys |
+| Database — LASOutsourcing | New synonym for `LASTax.dbo.tbl_ExceptionQueue_FollowUp_Notes` | Lets the API read follow-up notes. (Synonym for `tbl_ExceptionQueue_Tax_YearInfo` comes with US-138600) |
+| Database — LASTax | `usp_ExceptionQueue_Loan_Details_Upd` (router) | New optional last parameter `@FollowUpDate`, passed on to the DIR and DMU procedures |
+| Database — LASTax | `usp_ExceptionQueue_DIR_Loan_Details_Upd`, `usp_ExceptionQueue_DMU_Loan_Details_Upd` | New optional `@FollowUpDate`. When supplied, it is saved to `tbl_ExceptionQueue_UserTracking.FollowUpDate` and recorded in `tbl_ExceptionQueue_History`. Completion logic is not changed |
+| Database — tables | — | No new tables or columns. All four values already have columns |
+| SQL delivery | `SQL\Deployment-Scripts\<MMDDYYYY>\` | One idempotent deployment script; a `*_TEST.sql` validation script under `Documents` |
+
+### 3.3 Other consumers checked
+
+| Consumer | Impact |
+|---|---|
+| LERETANet EPQ screen (Save / Complete) | Calls the same router procedure with named parameters, so an optional new last parameter does not affect it. Needs a regression test because the DIR and DMU procedures are shared |
+| TSP path of the router procedure | Not changed |
+| COP flow | No new COP data. COP is affected only by the payload restructure described in US-138600 |
+| SSIS / SSRS | No table or column changes, so no impact expected |
+
+### 3.4 Data notes from DEV (read-only checks, November 2026)
+
+- Payment Status on EPQ tasks holds only `P`, `D` or empty.
+- No Bill Number is longer than 10 characters.
+- Very few open DIR tasks have any of these values yet: of 8,737 DIR tasks staged to MPS, none has a task-level Bill Number or Payment Status and 3 have a follow-up date. Most DIR tasks will therefore go out with these fields empty.
+- Of 645 DMU tasks staged to MPS, 626 have a Payment Status, 447 have an installment line for the task's own year and installment, and 93 have a follow-up date in the follow-up notes.
+
+### 3.5 Rules to respect
+
+- No borrower names, addresses, tax IDs or tokens in new log lines.
+- No secrets or connection details in code, tests or documents.
+- Unit tests (xUnit) for all changed code.
+
+---
+
+## 4. Test Scenarios
+
+| Category | Scenario | How to Test | Expected Result |
+|---|---|---|---|
+| Positive | Outbound — DIR task with a Bill No. | Save a Bill No. on an open DIR task staged to MPS, run the dispatcher, read the stored payload in the outbox | Bill Number appears on the task's own record in the payload |
+| Positive | Outbound — Payment Status Paid and Delinquent | Dispatch one task with Paid and one with Delinquent | Sent as `1` for Paid and `0` for Delinquent |
+| Positive | Outbound — prior installment with P&I and Bill No. | Dispatch a task whose Prior Information panel has a line with P&I and a Bill No. | That line in the payload carries the same P&I and Bill Number |
+| Positive | Outbound — follow-up date on the task | Dispatch a task that has a follow-up date on its tracking record | Follow-up Date is sent on the task's own record |
+| Positive | Outbound — follow-up date only in follow-up notes | Dispatch a task with no follow-up date on the tracking record but with dated follow-up notes | The most recent note date is sent |
+| Positive | Inbound — follow-up date received | Post a completion to `POST /api/Receiver` with a follow-up date | Task is completed; the follow-up date is saved on the tracking record; a history entry exists |
+| Positive | Inbound — Bill Number, P&I, Payment Status | Post a completion with these three values | Values are saved on the task and the installment line, as today |
+| Negative | Outbound — none of the four values exist | Dispatch a task with no bill number, P&I, payment status or follow-up date | Fields are sent empty; the task is sent and is not dead-lettered |
+| Negative | Outbound — Payment Status is neither Paid nor Delinquent | Dispatch a task with an empty Payment Status | Payment Status is sent empty |
+| Negative | Inbound — no follow-up date in the message | Post a completion without the field | Processed as today; the stored follow-up date is not changed |
+| Negative | Inbound — follow-up date in a wrong format | Post a completion with an invalid date text | The date is ignored and a warning is logged; all other values are saved and the task is completed |
+| Edge Case | Bill Number exactly 10 characters | Dispatch a task with a 10-character Bill No. | Sent unchanged |
+| Edge Case | Bill Number longer than 10 characters | Dispatch a task with a longer Bill No. | First 10 characters are sent and the event is logged; the task is not dead-lettered (pending open point 4) |
+| Edge Case | P&I of 0.00 versus no P&I | Dispatch one line with P&I 0.00 and one with no P&I | `0` is sent for the first and empty for the second |
+| Edge Case | Several follow-up notes with different dates | Dispatch a task with more than one dated follow-up note | The most recent date is sent |
+| Edge Case | DMU task (no task-level Bill No. on the screen) | Dispatch a DMU task with Bill No. values on its installment lines only | Bill Numbers appear on the installment lines; the task's own record has none |
+| Edge Case | Panel has a line for the task's own tax year and installment | Dispatch such a task | One record for that year and installment, carrying the panel line's P&I (pending open point 7) |
+| Regression | LERETANet EPQ screen — Save and Complete | Save and complete a DIR and a DMU task from the screen | Works as before; no error from the changed procedures |
+| Regression | Inbound message in today's format | Post a completion exactly as MPS sends it today | Processed as before |
+| Regression | COP dispatch and receive | Run the dispatcher for COP items and post a COP completion | COP values are unchanged |
+| Regression | Retry and dead-letter behaviour | Force an MPS failure during dispatch | Items are retried or dead-lettered as today |
+| Regression | TSP tasks through the router procedure | Save a TSP task from the screen | Works as before |

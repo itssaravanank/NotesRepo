@@ -1,0 +1,40 @@
+**Open Questions & Decisions — US-125266 (for Lead/PO review)**
+
+**1. Which date should be selected — the latest or the earliest?**
+*Reference:* In Scope #1–2 ("Detect changes to ELDO, ELDH, and ELDX"; "Trigger DIR eligibility recalculation upon ELD updates"); AC #1–2.
+*Explanation:* Each tax agency has several possible key dates tracked in the calendar system (ELD0, ELDH, ELDX). To determine whether an installment is 20 days overdue, the system must select one of these dates to measure against. Today, the live system selects whichever date is the latest.
+*Suggested approach:* Retain the "latest date" rule — it matches current live behavior. A brief confirmation that no change is needed here would be sufficient.
+
+**2. How should "current tax year" be defined?**
+*Reference:* In Scope #6–7 ("Add tax-year validation to loading DIR tax lines"; "Restrict DIR installment loading to the current tax year"); AC #7–8.
+*Explanation:* Part of this story requires confirming that correcting a historical tax record cannot generate a new work item. This requires a defined way to determine whether a record belongs to the current tax year or a prior one.
+*Suggested approach:* Use the tax year already recorded against that installment in the calendar data, compared to the most recent tax year on file for that agency. Requires confirmation that this matches business expectations.
+
+**3. How should an open work item be updated without reintroducing duplicate work items?**
+*Reference:* AC #2b–2c ("re-evaluates eligibility and updates the work item accordingly"; "Updated ELD values are reflected on existing...work items"); AC #3 ("does not create duplicate DIR work items").
+*Explanation:* A recent fix was introduced to prevent duplicate work items for the same loan. It does so by disregarding any further changes once a work item is already open — which also prevents legitimate date updates from being applied.
+*Suggested approach:* Allow an update only when the new date differs from what is already stored; continue to disregard the update when nothing has changed.
+
+**4. Which specific fields must be kept up to date?**
+*Reference:* AC #2c ("Updated ELD values are reflected on existing...work items"); AC #5 ("the updated ELD value is reflected on the record for audit and reporting purposes").
+*Explanation:* Two separate fields are associated with "the ELD date," in addition to a separate SLA due date field that is currently never updated after a work item is created.
+*Suggested approach:* Confirm that all three fields should be refreshed together as part of this fix.
+
+**5. Does "New" need to be treated differently from "Open"?**
+*Reference:* In Scope #3 ("Re-evaluate existing DIR work items with statuses: New, Open, Follow-Up"); AC #2b.
+*Explanation:* The story refers to "New," "Open," and "Follow-Up" work items as distinct categories. It is not yet confirmed that "New" and "Open" represent a meaningful distinction for this fix.
+*Suggested approach:* Treat both as the same category unless otherwise specified.
+
+**6. Should a catch-up check be included for installments that already missed their 20-day window?**
+*Reference:* PO Comments (not a numbered AC/In-Scope line) — PO's own question: *"Should this story also add a built-in check if ELD date passed but task wasnt created it creates it in subsequent runs?"*
+*Explanation:* As written, this story addresses only future date changes. It does not retroactively correct installments that are already past 20 days with no work item created.
+*Suggested approach:* Include this — it directly addresses the original issue and requires limited additional effort once the eligibility logic is revised.
+
+**7. Does the existing Allegheny data require a one-time manual correction?**
+*Reference:* PO Comments — PO's own question: *"I dont recall if we did a manual script fix for Allegheny... this fix wouldnt address that particular issue."*
+*Explanation:* The example referenced in this story is already missing its work item today, and this fix alone would not retroactively correct that record unless Question 8 is also included.
+*Suggested approach:* Yes, as a separate, smaller follow-up item, to be completed after the primary fix has been deployed and verified.
+
+**8. Should the Monthly Updates and Tax Sale Procurement queues receive the same change?**
+*Reference:* Not directly addressed by any In-Scope/AC line — all acceptance criteria refer only to "DIR." Raised independently, since the underlying stored procedures are shared across all three queues.
+*Suggested approach:* Limit changes to the Delinquent Installment Search queue, and verify through testing that the other two queues remain unaffected.

@@ -1,0 +1,316 @@
+# US-125266 — EPQ: Triggers to Reload Tax Lines for DLQ Check After Agency Calendar Date Changes — Detailed Analysis
+
+> Module: Business Tools → Exception Processing Queue (EPQ) → Delinquent Installment Search (DIR).
+> Database: `LASTax` (plus read-only cross-database reads from `LASTotalTaxSolution` and `LASCommon`).
+> No application code (DAL/BLL/UI/Dispatcher) is affected — this is a SQL-only change to a
+> SQL-Agent-scheduled batch process with no C# caller anywhere in the codebase.
+
+---
+
+## 1. Overview
+
+This story fixes two independent reliability/correctness gaps in the nightly EPQ batch process that
+creates and maintains Delinquent Installment Search (DIR) work items:
+
+- **Gap 1 (reliability):** The batch (`usp_ExceptionQueue_DataImportNew`, run by SQL Agent job
+  `LAS_ExceptionProcessQueue_DataImportNew`) decides DIR eligibility using an exact
+  `DATEDIFF(DAY, ELD date, GETDATE()) = 20` match against a single ELD date, with no mechanism to react
+  to later changes in that ELD date or to catch up on a missed match day. Compounding this, a recently
+  deployed duplicate-prevention guard (`usp_ExceptionQueue_DataImportNewIU`, from US-120627) fully
+  suppresses *all* further processing — including legitimate date refreshes — once a DIR item exists and
+  is open for a given loan/agency/tax combination. Net effect: once an ELD date changes after a DIR item
+  already exists (open or not), nothing about that item is ever updated again by this batch.
+- **Gap 2 (correctness):** No validation anywhere in the eligibility path confirms an installment
+  belongs to the current tax year before a new DIR record is created/loaded. A correction to a prior
+  (historical, already-closed) tax year's calendar data can therefore incorrectly satisfy the 20-day rule
+  and generate a brand-new DIR work item for data that is not an active, current issue.
+
+Both gaps live entirely inside two existing stored procedures in `LASTax`. No new tables, no DAL/BLL/UI
+changes, and no dispatcher changes are required.
+
+---
+
+## 2. Affected Components (exact file paths)
+
+| File | Nature of change |
+|---|---|
+| `SQL/LASTax/dbo/Stored Procedures/usp_ExceptionQueue_DataImportNew.sql` | Correct the ELD tie-break rule (oldest, not latest — see §14); loosen/rework the 20-day exact-match eligibility window; add the new tax-year validation before setting the DIR eligibility flag. |
+| `SQL/LASTax/dbo/Stored Procedures/usp_ExceptionQueue_DataImportNewIU.sql` | Add a carve-out to the US-120627 dedup guard so a genuine ELD-driven change updates an existing open/completed DIR record instead of being suppressed; extend the fields refreshed on update (ELD date, SLA/reporting due date, Load/Date-Added — see §14); extend the audit/history entry to note the recalculation occurred. |
+| `SQL/LASTax/dbo/Stored Procedures/Usp_exceptionqueue_history_ins.sql` | Not structurally modified — reused as-is, called with a new comment/reason string for the audit trail (AC #6). |
+
+**Not required / out of scope:**
+- No DAL changes — `ExceptionQueueDAL.cs` has no method calling either affected SP (confirmed by searching the whole class and the broader `MiddleTier`/`BatchProcessing`/`Services` folders).
+- No BLL changes — `ExceptionQueueBLL.cs` likewise has no relevant method.
+- No Dispatcher changes — `Host/Tax.cs` never routes to these SPs; they run purely via SQL Agent.
+- No UI changes — `DelinquencySearchExceptions.aspx` and the other Exception Queue screens read live from
+  the same tables; once the batch SPs are corrected, the existing screens reflect the fix automatically.
+- No changes to `usp_ExceptionQueue_DataImportNew`'s DMU/TSP branches, or to DMU/TSP's own supporting
+  objects — confirmed via comparative analysis (§13) that they use independent eligibility mechanisms.
+
+---
+
+## 3. Database Changes
+
+**Database:** `LASTax`. No schema changes — both affected objects are stored procedures only. No new
+tables or columns; all fields referenced already exist.
+
+### 3.1 ELD date selection (tie-break correction)
+
+Per PO direction ("use story #129258 to get ELD rules"), the oldest non-null date among `ELD0`/`ELDH`/
+`ELDX` must win (tie-break: `ELDH` > `ELDX` > `ELD0`), not the latest as currently deployed:
+
+```sql
+-- Current (incorrect per PO direction):
+ORDER BY v.DueDate DESC, CASE v.RunCode WHEN 'ELDH' THEN 1 WHEN 'ELDX' THEN 2 ELSE 3 END
+
+-- Required:
+ORDER BY v.DueDate ASC, CASE v.RunCode WHEN 'ELDH' THEN 1 WHEN 'ELDX' THEN 2 ELSE 3 END
+```
+
+This also brings the live SP in line with the existing (never-deployed) tSQLt test
+`[test_usp_ExceptionQueue_DataImportNew].[test_ELD_Logic_US129258]`, which already expects this ordering.
+
+### 3.2 Eligibility window (reliability fix)
+
+Current logic requires an exact match:
+
+```sql
+WHERE DATEDIFF(DAY, w.DueDate, @Getdate) = @StartDays
+```
+
+This must become reactive to ELD date changes rather than a single-day snapshot, and must correctly
+distinguish "update an existing item" from "create a new item" (see §3.3) rather than relying solely on
+the US-120627 guard to prevent duplicates. Exact WHERE-clause mechanics (e.g., whether to use `>=
+@StartDays`, and whether to retain `@EndDays` — currently fetched but unused — as an upper bound) are an
+implementation-time decision, not fixed by this document.
+
+### 3.3 Dedup guard carve-out (`usp_ExceptionQueue_DataImportNewIU`)
+
+The existing US-120627 guard:
+
+```sql
+IF @WinnerExceptionID IS NOT NULL
+BEGIN
+    -- log to DedupLog, mark staging processed, RETURN — suppresses everything
+END
+```
+
+must be extended so that when the incoming ELD-derived value differs from what is already stored for
+that record, the procedure proceeds to **update** the existing record (ELD date, SLA/reporting due date,
+Load/Date-Added — see §14) rather than suppressing it. When nothing has actually changed, the existing
+suppression behavior is preserved (per PO Answer #3: "system updates the record and does not create a
+duplicate record").
+
+### 3.4 Tax-year validation (new)
+
+The existing cursor body declares `@CurrentTaxYear`/`@InstallmentNo` but never assigns or uses them in
+the DIR eligibility branch:
+
+```sql
+IF (@DLQResearchFlag = '1') ... -- no tax-year check present anywhere in this branch today
+```
+
+A new validation must be added before the DIR eligibility flag is set, so that prior-tax-year
+installments cannot satisfy the rule. The exact comparison source for "current tax year" (per agency,
+not a single system-wide year — see §14) still requires final confirmation before implementation.
+
+---
+
+## 4. DAL Changes
+
+N/A — no DAL method anywhere calls `usp_ExceptionQueue_DataImportNew` or
+`usp_ExceptionQueue_DataImportNewIU`. Confirmed by searching `ExceptionQueueDAL.cs` directly and the
+broader `LERETANet/MiddleTier`, `LERETANet/BatchProcessing`, and `LERETANet/Services` folders.
+
+---
+
+## 5. BLL Changes
+
+N/A — no BLL method anywhere calls either affected stored procedure (`ExceptionQueueBLL.cs` confirmed
+clear).
+
+---
+
+## 6. Dispatcher Changes
+
+N/A — `Host/Tax.cs` never routes to either affected stored procedure; both are invoked purely via the
+SQL Agent job `LAS_ExceptionProcessQueue_DataImportNew`, outside the Remoting path entirely.
+
+---
+
+## 7. UI Changes
+
+N/A — no ASPX page, code-behind, or control changes. `DelinquencySearchExceptions.aspx` (and the other
+Exception Queue screens: Completed, Follow-Up, Data History, QC, Notes) all read live from
+`tbl_ExceptionQueue` / `tbl_ExceptionQueue_UserTracking` / `tbl_ExceptionQueue_Tax_Info` /
+`tbl_ExceptionQueue_Tax_YearInfo` via `usp_ExceptionQueue_Delinquency_Installment_ReSearch_Sel` and
+related SPs — once the batch SPs are corrected, these screens reflect the fix automatically with no
+code changes.
+
+---
+
+## 8. Validation Rules
+
+| Rule | Applies to |
+|---|---|
+| Oldest non-null ELD0/ELDH/ELDX wins (ELDH > ELDX > ELD0 tie-break) | DIR eligibility only (§3.1) |
+| Only current-tax-year installments may create a **new** DIR record; prior-year installments must not | DIR eligibility only (§3.4) — confirmed forward-only, no retroactive changes to existing EPQ records (PO Answer #2) |
+| An existing open/completed DIR record is only **updated** (never duplicated) when the incoming ELD-derived value differs from what is stored | DIR only, inside the shared `usp_ExceptionQueue_DataImportNewIU` (§3.3) — must be explicitly scoped to `SystemCode = 'DIR'` so DMU/TSP processing is provably unaffected |
+| New/Open/Follow-Up DIR work items are treated identically (no distinct handling per status) | Confirmed by PO Answer #5 |
+
+---
+
+## 9. Error Handling
+
+No changes to the existing pattern:
+- The per-row `TRY`/`CATCH` inside `usp_ExceptionQueue_DataImportNew`'s cursor loop, logging failures to
+  `[LASCommon].[SqlProcess].[Log]`, is preserved as-is.
+- The existing dedup-suppression audit trail (`tbl_ExceptionQueue_DedupLog`) is preserved for the
+  "no real change, correctly suppressed" case.
+
+---
+
+## 10. Configuration Changes
+
+No new configuration keys are required. Existing `LASCommon.dbo.tbl_Config_Master` keys
+(`ConfigSystemCode='EPQ'`, `ConfigKey='StartDays'` = 20, and `ConfigKey='EndDays'` — currently fetched
+but unused) remain available; whether `EndDays` is adopted as part of the reworked eligibility window
+(§3.2) is an implementation-time decision.
+
+---
+
+## 11. SQL Script Delivery
+
+| File | Purpose |
+|---|---|
+| `SQL/Deployment-Scripts/<MMDDYYYY>/01_US125266_AlterSp_usp_ExceptionQueue_DataImportNew.sql` | Deployment script for §3.1/§3.2/§3.4 |
+| `SQL/Deployment-Scripts/<MMDDYYYY>/02_US125266_AlterSp_usp_ExceptionQueue_DataImportNewIU.sql` | Deployment script for §3.3 |
+| `Documents/LERETANet/Scripts/US-125266/01_US125266_TEST.sql` | Test/validation script (see §16) |
+
+Not yet created — this document records the plan; the scripts themselves are produced at Phase 4
+(implementation), following this workspace's standard `CREATE OR ALTER PROCEDURE` deployment-script
+convention.
+
+---
+
+## 12. BusinessEntities / DataSet Changes
+
+N/A — no new columns are introduced or returned by either stored procedure; no typed `DataSet` XSD
+changes are required.
+
+---
+
+## 13. Edge Cases
+
+| Case | Handling |
+|---|---|
+| Two of ELD0/ELDH/ELDX share the exact same (oldest) date | Tie-break: `ELDH` > `ELDX` > `ELD0` |
+| An installment has no ELD0/ELDH/ELDX on file at all | Excluded from DIR eligibility — unchanged existing behavior |
+| A single loan has multiple parcels/TaxIDs under one agency | Each TaxID evaluated independently — confirmed via live discovery data (e.g., Loan 15016876 / Agency 370020000 spans 6+ distinct TaxIDs) |
+| A DIR item is already Completed | ELD date, SLA/reporting due date, and Load/Date-Added fields are refreshed; `isComplete`/`isFollowUp` are left untouched; the item is never reopened (PO Answer #3, #5; AC #4–#5) |
+| DMU/TSP SystemCodes pass through the same shared `usp_ExceptionQueue_DataImportNewIU` | Must remain provably unaffected — all new logic explicitly scoped to `SystemCode = 'DIR'` (see §13 comparative analysis below) |
+| A correction to a prior-tax-year record satisfies the 20-day rule | Excluded from new-record creation by the new tax-year validation (§3.4) |
+| Installments already missing a DIR record as of today (e.g., the Allegheny example) | **Not** retroactively created by this fix — this is a go-forward-only change (PO Answer #2, #6). A live discovery query identified 637 such gaps system-wide as of 2026-10-30 (76 under tax year 2026, 548 under 2025, 13 under 2024) — provided to PO/Ops for review, not remediated by this story |
+
+### DMU/TSP comparative analysis summary (PO Answer #7)
+
+| Queue | Eligibility driver | Uses ELD0/ELDH/ELDX? |
+|---|---|---|
+| DIR | The 20-day ELD-calendar rule (`#tbl_DLQ_Installment_Research`) | Yes — the only one |
+| DMU | `DelqInd`/`DateDownInd` lien-level flags, unrelated to the calendar | No |
+| TSP | Presence in `lat_RPT_TDR360`/`lat_RPT_TDD360`/`tbl_cta_ReportedItems` | No for eligibility; yes for a secondary display-only due date, via the separate function `lat_GET_ELDDate` |
+
+**Conclusion:** Gap 1 (the ELD-reliability bug) has no direct equivalent in DMU or TSP, since neither
+uses the same eligibility mechanism — no change to their eligibility logic is required. The real shared
+risk is that `usp_ExceptionQueue_DataImportNewIU` is called identically for all three `SystemCode`
+values; every new carve-out in §3.3 must be explicitly conditioned on `SystemCode = 'DIR'`.
+
+**Flag for PO confirmation:** `lat_GET_ELDDate` (used only by TSP) was itself modified 8 days before this
+story's DIR-side change (US-134881, same author) to use the **greatest** date — the opposite rule from
+what this story now applies to DIR. Recommend confirming with PO/Tharangini that this divergence between
+DIR (oldest) and TSP (greatest) is intentional before finalizing.
+
+---
+
+## 14. Assumptions
+
+- "Use story #129258 to get ELD rules" (PO Answer #1) is interpreted as: oldest non-null value among
+  ELD0/ELDH/ELDX wins, tie-break `ELDH` > `ELDX` > `ELD0` — matching the existing (never-deployed) tSQLt
+  test for US-129258.
+- "Load Dates" (PO Answer #4) is interpreted as `tbl_ExceptionQueue.InsertedDate`, displayed as
+  "Date Added" on the live DIR screen. Per the PO's earlier worked example, this field is expected to be
+  recalculated for Open/New items when the underlying ELD date changes — not treated as an immutable
+  creation timestamp in this case.
+- The exact source/formula for "current tax year" (§3.4) is **not yet finalized** — PO confirmed the
+  *scope* (forward-only, no retroactive changes to existing EPQ records) but not the precise comparison
+  value. An initial attempt to proxy this as "the latest tax year on file per agency" was tested against
+  live Allegheny data and proven incorrect (it excluded the genuinely-overdue 2026 record in favor of an
+  already-loaded, not-yet-due 2027 record). This must be resolved before §3.4 can be implemented.
+- No DMU/TSP eligibility-logic changes are in scope for this story (see §13 comparative analysis);
+  mitigation is explicit `SystemCode = 'DIR'` scoping of all new logic in the shared procedure.
+- The 637-record discovery findings are for PO/Ops visibility only; no one-time data-correction script
+  (e.g., for the Allegheny example) is in scope for this story, per PO Answer #2 ("we cannot update
+  existing or older records in EPQ") combined with PO Answer #6 (requesting a list, not a fix). This
+  reading has not yet received a single explicit PO confirmation and should be verified.
+- Whether Tax Year 2025 (548 of the 637 discovered gaps) counts as "current" or "historical" for the
+  affected agencies has not been confirmed by PO/Ops — treated as closed/historical for planning purposes
+  per the user's working instruction ("for now"), leaving 76 records (Tax Year 2026) as the actionable
+  current-year count. This is provisional and should be revisited once PO/Ops confirm.
+
+---
+
+## 15. Dependencies
+
+| Ticket | Relationship |
+|---|---|
+| **US-129258** | DIR's ELD tie-break logic — its intended behavior (oldest wins) was apparently never actually deployed (SP header comment claims the change, but the live `ORDER BY` clause still reads `DESC`). This story must complete/correct that defect as part of §3.1. |
+| **US-120627** | Introduced the dedup guard in `usp_ExceptionQueue_DataImportNewIU` that this story must carefully extend (§3.3), not remove — it fixed a real duplicate-creation bug that must not regress. |
+| **US-134881** | Modified `lat_GET_ELDDate` (TSP's own ELD date function) to use the greatest date, 8 days before this story's PO-confirmed "oldest" direction for DIR. Divergence flagged for confirmation (§13), not otherwise a blocking dependency. |
+
+---
+
+## 16. Test Scenarios
+
+| # | Scenario | Expected Result |
+|---|---|---|
+| 1 | ELD date changes for a loan with an existing **open** DIR item | Existing item is updated (ELD date, SLA/reporting due date, Load/Date-Added); no duplicate created |
+| 2 | ELD date changes for a loan with an existing **completed** DIR item | Date fields refreshed on the existing record; `isComplete`/`isFollowUp` unchanged; item not reopened |
+| 3 | ELD date newly satisfies the 20-day rule, no existing DIR item for that loan/agency/tax | A new DIR item is created |
+| 4 | A correction is made to a **prior-tax-year** record that would otherwise satisfy the 20-day rule | No new DIR item is created |
+| 5 | A **current-tax-year** installment satisfies all eligibility criteria | DIR item is created/updated successfully (regression check against the new tax-year validation) |
+| 6 | The batch runs twice in succession with no underlying data change | No duplicate items created on the second run |
+| 7 | DMU and TSP processing for the same loans, before and after this change | Behavior unchanged (regression check) |
+| 8 | Two of ELD0/ELDH/ELDX tie on the oldest date | `ELDH` wins over `ELDX` over `ELD0` |
+
+---
+
+## 17. Deployment Sequence
+
+```
+1. SQL (both altered stored procedures)
+2. No BusinessEntities, MiddleTier DLL, Remoting Host restart, or Web recycle required —
+   this is a SQL-Agent-only batch process with no application-tier dependency.
+```
+
+---
+
+## 18. Open Questions
+
+1. **Exact "current tax year" comparison source** for §3.4 — PO confirmed scope (forward-only) but not
+   the precise formula; the first candidate tested (latest year on file per agency) was proven incorrect
+   against live data.
+2. **Explicit confirmation** that no retroactive one-time data-fix script (e.g., for the Allegheny
+   example, or any of the 637 discovered gaps) is wanted — current reading is inferred from two separate
+   PO answers, not stated directly.
+3. **Confirmation that the TSP (`lat_GET_ELDDate`, US-134881, "greatest") vs. DIR ("oldest", this story)
+   tie-break divergence is intentional**, not an unreconciled inconsistency between two recent, related
+   changes by the same author.
+4. **Whether Tax Year 2025 is "current" or "historical"** for the agencies representing 548 of the 637
+   discovered gaps — materially changes the actionable scope of the discovery findings (currently treated
+   as historical, per the user's provisional "for now" instruction).
+
+---
+
+*Document generated: 2026-10-30. Based on source code in `c:\SCADEV70\Projects\SQL\LASTax` and
+`c:\SCADEV70\Projects\LERETANet`, live discovery queries against `scasql30d.lereta.net\LNTdevstg`
+(Production), and PO answers recorded in this ticket's comment thread (2026-10-30).*

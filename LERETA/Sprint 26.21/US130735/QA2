@@ -1,0 +1,55 @@
+
+
+
+### 1. Borrower Name Required
+
+* **Expected Result: No** – If `Pay_Borrower_Ind` is NULL, empty, or contains only spaces.
+* **Expected Result: Yes** – If `Pay_Borrower_Ind` contains a non-empty value.
+
+### 2. Situs Required
+
+* **Expected Result: No** – If `Pay_Situs_Ind` is NULL, empty, or contains only spaces.
+* **Expected Result: Yes** – If `Pay_Situs_Ind` contains a non-empty value.
+
+### 3. Reference Number Required
+
+* **Expected Result: No** – If `PAY_REFERENCE_NO_IND` is NULL, empty, or contains only spaces.
+* **Expected Result: Yes** – If `PAY_REFERENCE_NO_IND` contains a non-empty value.
+
+### 4. Legal Description Required
+
+* **Expected Result: No** – If `PAY_LEGAL_DESCR_IND` is NULL, empty, or contains only spaces.
+* **Expected Result: Yes** – If `PAY_LEGAL_DESCR_IND` contains a non-empty value.
+
+### 5. Bills Required
+
+* **Expected Result: No** – If `BILL_TYPE_CODE` is NULL or contains a non-empty value.
+* **Expected Result: Yes** – If `BILL_TYPE_CODE` is an empty string or contains only spaces.
+
+### 6. Previous Owner Required
+
+* **Expected Result: No** – If `Pay_Prev_Owner_Ind` is NULL, empty, or contains only spaces.
+* **Expected Result: Yes** – If `Pay_Prev_Owner_Ind` contains a non-empty value.
+
+### 7. Tax ID Required
+
+The Tax ID Required field will return **Yes** only when all the following conditions are met:
+
+1. `PAY_TAX_ID_IND` is NULL, empty, or contains only spaces.
+2. Borrower Name Required = No.
+3. Situs Required = No.
+4. Reference Number Required = No.
+5. Legal Description Required = No.
+6. Previous Owner Required = No.
+7. Bills Required = No.
+
+**Expected Result:**
+
+* **Yes** – If all the above conditions are satisfied.
+* **No** – If any one of the conditions is not satisfied.
+
+
+### 8. Memo Bills Required
+
+* **Expected Result: Yes** – If `BILL_TYPE_CODE` is `M` (case-insensitive).
+* **Expected Result: No** – If `BILL_TYPE_CODE` contains any other value or is NULL.

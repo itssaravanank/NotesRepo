@@ -1,0 +1,30 @@
+**DMU and TSP Analysis — Findings**
+
+In response to the request to evaluate whether changes are needed across all three queues (DIR, DMU, TSP):
+
+**1. Do we need to make changes in DMU or TSP?**
+No. DMU and TSP determine eligibility through entirely different mechanisms that do not rely on the ELD0/ELDH/ELDX calendar dates:
+- DMU eligibility is based on an existing delinquency indicator already present on the loan record.
+- TSP eligibility is based on separate tax-sale reporting data.
+
+Neither queue uses the 20-day calendar rule this story is correcting, so the specific reliability issue described in this story does not apply to them.
+
+One item worth confirming: TSP does reference the calendar dates for a secondary due-date display, through separate logic that was recently updated (independently of this story) to use the **latest** available date. This story is updating DIR's equivalent logic to use the **earliest** available date instead. We recommend confirming this difference is intentional, since the two queues will end up using different rules against the same underlying calendar data.
+
+**2. Would our changes impact DMU or TSP's existing records?**
+Potentially, if not handled carefully. The stored procedure responsible for creating and updating these records is shared across all three queues. To prevent any impact, the changes being made for DIR will be explicitly scoped to apply only when processing DIR records, leaving DMU and TSP logic untouched. This will be verified through testing after implementation.
+
+**Recommendation:** No functional changes are required for DMU or TSP as part of this story. Implementation will be scoped specifically to DIR, with verification testing to confirm DMU and TSP continue to behave exactly as they do today.
+
+---
+
+
+
+1. How should "current tax year" be determined for an installment?
+Reference: Tax-year validation requirement (In Scope #6–7; AC #7–8).
+Explanation: We tested two candidate definitions against this story's own Allegheny example, and both failed. "Latest tax year on file" and the agency's own recorded Current_Tax_Year field both show 2027 for Allegheny — but the installment that is actually 186 days overdue is tagged 2026. We need the actual business rule: is "current" the agency's own recorded billing-cycle year, or the most recent year whose due date has already passed?
+
+
+**How should "current tax year" be determined for an installment?**
+
+This story says the system should only create new tasks for the current tax year, and never for an old tax year. But there's no agreed way to tell which tax year counts as "current" right now. We need that defined before this rule can be built.

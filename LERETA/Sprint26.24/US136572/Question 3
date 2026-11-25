@@ -1,0 +1,100 @@
+
+---
+
+## US-138600: open questions
+
+**Q1. Can we send the prior records in this format? Please confirm.** (MPS / Common Services)
+- **Context:** each item in the import request is flat today and carries one tax year and one installment. Prior records cannot go as extra items, because a repeated `sourceUniqueId` in a batch is rejected.
+- **Suggested:** add an optional list, `taxLines`, to each item. All existing fields stay unchanged and keep describing the current record. The field names are the ones MPS already sends back in `taxLines` on the completion message.
+
+```json
+{
+  "correlationId": "ac866241-4f49-4f05-a7a9-1b53dbb56ffa",
+  "items": [
+    {
+      "sourceSystem": 3,
+      "sourceUniqueId": "DIR-249748-1",
+      "triggerConditionID": 19,
+      "taxYear": 2026,
+      "installment": "1",
+      "...": "all other existing fields unchanged",
+      "taxLines": [
+        {
+          "year": "2025",
+          "installment": "1",
+          "paymentCode": 0,
+          "amountDue": 0.82,
+          "penaltiesAndInterest": 0.00,
+          "billNumber": null,
+          "eldDate": "2025-01-20T00:00:00",
+          "notes": null
+        },
+        {
+          "year": "2025",
+          "installment": "2",
+          "paymentCode": 0,
+          "amountDue": 0.00,
+          "penaltiesAndInterest": 0.00,
+          "billNumber": null,
+          "eldDate": "2025-04-20T00:00:00",
+          "notes": null
+        }
+      ]
+    }
+  ]
+}
+```
+
+- **Please confirm:**
+  - the import endpoint can accept an optional `taxLines` list on each item;
+  - these names and types are acceptable: `year` (text), `installment` (text), `paymentCode` (0 = unpaid, 1 = paid), `amountDue` (decimal), `penaltiesAndInterest` (decimal), `billNumber` (text), `eldDate` (date), `notes` (text);
+  - when a loan has no prior records, whether we send an empty list (`"taxLines": []`) or leave the field out.
+
+
+**Q2. When a value is blank in the Prior Information panel, we plan to send that field as `null`. Will MPS accept `null` for these fields?** (MPS / Common Services)
+- **Context:** some installments have blank values: a blank payment code, an empty amount or P&I, no bill number, no notes, or an ELD date that is empty or 01/01/1900.
+- **Suggested:** send `null` for a blank value. We will not send `0` or an empty string, because `0` would mean "the amount is zero" while `null` means "no value on our side". Today's payload already does this, for example `"amountDue": null`.
+
+```json
+{
+  "year": "2024",
+  "installment": "1",
+  "paymentCode": 1,
+  "amountDue": null,
+  "penaltiesAndInterest": null,
+  "billNumber": null,
+  "eldDate": null,
+  "notes": null
+}
+```
+
+- **Please confirm:**
+  - MPS accepts `null` in `paymentCode`, `amountDue`, `penaltiesAndInterest`, `billNumber`, `eldDate` and `notes` without rejecting the item;
+  - `year` and `installment` are always sent with a value, exactly as stored.
+
+**Q3. Are the other highlighted fields in scope?** (PO)
+- **Context:** the screenshots also box Redeem Amt2, Good Thru2, SLA Due Date, ELD Date and, on DMU, Payment Status, Procurement Fee, Tax Sale Indicator and Comments. The story text only mentions tax year and installment records. Redeem Amt1, Good Thru1, Base Tax Amount and Agency Info Posting Date are already sent.
+- **Suggested:** add Redeem Amt2 and Good Thru2 only, since MPS already returns those two. Leave the rest out unless requested; Payment Status is covered by US-136572.
+- **Impact:** decides how many new top-level fields join the contract change.
+- **Status:** ⏳ Pending
+
+**Q4. If we deploy before MPS is ready to read `taxLines`, will the import ignore the new field without rejecting the item?** (MPS / Common Services)
+- **Context:** the two systems release separately.
+- **Suggested:** MPS ignores unknown fields, so either side can deploy first.
+
+---
+
+
+**Q4. Should we send the empty installment slots of the Prior Information panel, or only the installments that have data?** 
+- **Context:** the panel always shows four installment boxes per tax year, and the unused ones are saved as empty rows. Example from the DMU screenshot, tax year 2022:
+
+| Slot | PC | Amount | P/I | ELD |
+|---|---|---|---|---|
+| Install1 | 1 | 3852.62 | 308.21 | 11/01/2022 |
+| Install2 | 1 | 123.38 | 1.65 | 05/01/2023 |
+| Install3 | blank | 0.00 | 0.00 | blank |
+| Install4 | blank | 0.00 | 0.00 | blank |
+
+  That loan has four tax years in the panel, so it holds 16 rows: 8 with data and 8 empty.
+- **Question:** for that loan, do we send 16 lines to MPS, or only the 8 that have data?
+- **Suggested:** send only the 8 with data. An empty slot gives MPS no information.

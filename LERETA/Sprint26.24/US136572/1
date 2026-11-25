@@ -1,0 +1,156 @@
+Written for: PO and Lead, as a comment on the US-136572 user story in Azure Boards.
+
+**US-136572 – Questions for PO / Lead review**
+
+Common Services has shared the outbound payload they expect from us (below). The four new fields of this story sit inside each entry of the `installments` list: `billNumber`, `penaltiesAndInterest`, `paymentStatus` and `followUpDate`.
+
+**Payload expected by Common Services (LERETA to MPS)**
+
+```json
+{
+  "correlationId": "string",
+  "items": [
+    {
+      "correlationId": "string",
+      "sourceSystem": 0,
+      "sourceUniqueId": "string",
+      "triggerCondition": "string",
+      "taxIdFormatted": "string",
+      "taxIdUnformatted": "string",
+      "clientNumber": "string",
+      "customerNumber": "string",
+      "contractId": "string",
+      "loanNumber": "string",
+      "agencyId": "string",
+      "borrowerName": "string",
+      "propertyAddress": "string",
+      "mailingAddress": "string",
+      "contractIssueDate": "2026-11-19T11:28:26.295Z",
+      "serviceType": "string",
+      "legalDescription": "string",
+      "closingDate": "2026-11-19T11:28:26.295Z",
+      "parcelOrAccountNumber": "string",
+      "triggerConditionId": 0,
+      "bpoAgency": "string",
+      "allowZeroAmount": true,
+      "lienSequenceNumber": "string",
+      "taskTaxYear": 0,
+      "taskInstallment": "string",
+      "installments": [
+        {
+          "correlationId": "string",
+          "taxYear": 0,
+          "frequency": "string",
+          "installment": "string",
+          "specialConditionCode": "string",
+          "amountDue": 0,
+          "baseAmount": 0,
+          "paymentOptionIndicator": "string",
+          "billReceived": "string",
+          "asOfDate": "2026-11-19T11:28:26.295Z",
+          "goodThruDate": "2026-11-19T11:28:26.295Z",
+          "paymentStatus": "string",
+          "billNumber": "string",
+          "followUpDate": "2026-11-19T11:28:26.295Z",
+          "penaltiesAndInterest": 0
+        }
+      ]
+    }
+  ]
+}
+```
+
+**Questions**
+
+**Q1. Payment Status values sent to MPS**
+- **Context:** MPS accepts 0, 1 or blank.
+- Can we send Paid = 1, Delinquent = 0, and blank for anything else on the task's own record?
+- Can we send the installment's payment code (1 or 0, blank when empty) on each prior installment?
+- Please confirm.
+
+**Q2. Which Follow-up Date is sent to MPS**
+- **Context:** a task has one Follow-up Date. Follow-up notes also have their own dates.
+- Can we send the task's Follow-up Date, and when it is empty, the latest date from the task's follow-up notes?
+- Please confirm.
+
+**Q3. Follow-up Date on prior installments**
+- **Context:** the payload has `followUpDate` on every installment, but LERETA holds one Follow-up Date per task.
+- Can we fill it only on the task's own record and leave it blank on the prior installments?
+- Please confirm.
+
+**Q4. Bill Number longer than 10 characters**
+- **Context:** the story says alphanumeric 10. Our Bill No. field allows up to 50.
+- Can we send the first 10 characters, so the task is still sent to MPS?
+- Please confirm.
+
+**Q5. Saving the Follow-up Date received from MPS**
+- **Context:** already agreed that the task is completed whatever the follow-up date is.
+- Can we save the date as the task's Follow-up Date with a history entry, without creating a follow-up note?
+- Please confirm.
+
+**Q6. MPS sends no Follow-up Date**
+- Can we keep the Follow-up Date already on the task when MPS sends none?
+- Please confirm.
+
+**Q7. Acceptance criteria 5a to 5c (inbound Bill Number, P&I, Payment Status)**
+- **Context:** these three values from MPS are already saved to the EPQ today.
+- Can we cover them by testing only, with no code change?
+- Please confirm.
+
+**Pending with Common Services (for information)**
+- We have only the outbound format. We still need the inbound format (MPS to LERETA) showing where Follow-up Date comes back and in what date format.
+
+
+
+Written for: PO and Lead, as the corrected questions for the US-136572 Azure Boards comment.
+
+You are right, they are two different fields, and my Q1 mixed them. The task has a Payment Status (Paid / Delinquent), while each prior installment has a Payment Code (PC, 0 or 1). The payload has only one field for both, `paymentStatus`, on each installment.
+
+I have split Q1 into two questions. The intro and the payload block stay as they are; the questions section becomes:
+
+**Questions**
+
+**Q1. Payment Status of the task sent to MPS**
+- **Context:** the task has a Payment Status (Paid / Delinquent). MPS accepts 0, 1 or blank. Today, when MPS sends payment code 1 we save Paid, and for 0 we save Delinquent.
+- Can we send Paid = 1, Delinquent = 0, and blank for anything else in `paymentStatus` of the task's own record?
+
+**Q2. Payment Code of the prior installments sent to MPS**
+- **Context:** a prior installment has no Payment Status. It has a Payment Code (PC, 0 or 1) in the Prior Information panel. The payload has no separate payment code field, only `paymentStatus` on each installment.
+- Can we send the prior installment's Payment Code (0 or 1, blank when empty) in `paymentStatus`?
+
+
+**Q3. Which Follow-up Date is sent to MPS**
+- **Context:** a task has one Follow-up Date. Follow-up notes also have their own dates.
+- Can we send the task's Follow-up Date, and when it is empty, the latest date from the task's follow-up notes?
+- Please confirm.
+
+**Q4. Follow-up Date on prior installments**
+- **Context:** the payload has `followUpDate` on every installment, but LERETA holds one Follow-up Date per task.
+- Can we fill it only on the task's own record and leave it blank on the prior installments?
+- Please confirm.
+
+**Q5. Bill Number longer than 10 characters**
+- **Context:** the story says alphanumeric 10. Our Bill No. field allows up to 50.
+- Can we send the first 10 characters, so the task is still sent to MPS?
+- Please confirm.
+
+**Q6. Follow-up Date coming back from MPS**
+- **Context:** Common Services confirmed the inbound format (MPS to LERETA) is not changed. That format has no Follow-up Date field, so MPS will not send a Follow-up Date back.
+- Can we treat Follow-up Date as outbound only and remove the inbound Follow-up Date from this story?
+- Please confirm.
+
+**Q7. Acceptance criteria 5a to 5c (inbound Bill Number, P&I, Payment Status)**
+- **Context:** these three values from MPS are already saved to the EPQ today, and the inbound format is not changed.
+- Can we cover them by testing only, with no code change?
+- Please confirm.
+
+
+
+Written for: PO and Lead, as the merged question for the US-136572 Azure Boards comment.
+
+This replaces Q1 and Q2; the remaining questions move up to Q2–Q6.
+
+**Q1. Payment Status and Payment Code sent to MPS**
+- **Context:** the task has a Payment Status (Paid / Delinquent). A prior installment has no Payment Status; it has a Payment Code (PC, 0 or 1) in the Prior Information panel. The payload has only one field for both, `paymentStatus`, on each installment. MPS accepts 0, 1 or blank.
+- Can we send Paid = 1, Delinquent = 0, and blank for anything else in `paymentStatus` of the task's own record?
+- Can we send the Payment Code (0 or 1, blank when empty) in `paymentStatus` of each prior installment?

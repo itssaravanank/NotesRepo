@@ -1,0 +1,268 @@
+# US-125266 — EPQ Triggers to Reload Tax Lines for DLQ Check After Agency Calendar Dates Change — Detailed Analysis
+
+> Module: Business Tools → Exception Processing Queue → Delinquent Installment Search (DIR).
+> Pure SQL-layer fix against `LASTax` (plus read access to `LASTotalTaxSolution` and
+> `LASCommon`). No application code (DAL/BLL/UI/Dispatcher) is changed — the two affected
+> stored procedures are invoked only by SQL Server Agent job
+> `LAS_ExceptionProcessQueue_DataImportNew`, confirmed via full codebase trace to have no
+> C#, SSIS, or other stored-procedure caller anywhere in LERETANet or LeretanetCore.
+
+---
+
+## 1. Overview
+
+EPQ's Delinquent Installment Search (DIR) loading process has two confirmed gaps:
+
+**Gap 1 — Eligibility check is a brittle one-shot snapshot.** `usp_ExceptionQueue_DataImportNew`
+picks the winning ELD date (latest of `ELD0`/`ELDH`/`ELDX` per agency/tax year/installment from
+`LASTotalTaxSolution.dbo.lais_PayeeCalendar`) and only flags an installment eligible when
+`DATEDIFF(DAY, ELDDate, GETDATE())` is **exactly** equal to the configured `@StartDays` (20).
+If that one exact day is missed — job didn't run, data changed later, etc. — the installment is
+never picked up again, with no retry. Separately, once a DIR record exists (open or completed),
+the existing US-120627 dedup guard in `usp_ExceptionQueue_DataImportNewIU` suppresses every
+subsequent attempt unconditionally, so a genuine later change to the ELD date never refreshes
+the existing record's dates.
+
+**Gap 2 — No current-tax-year validation exists anywhere in the flow.** The eligibility check
+has no concept of "is this installment's tax year the current one" — fixing/touching an old
+year's calendar data could in principle spawn a brand-new task for a prior year.
+
+**Confirmed via live testing on DEV (2026-11-03):**
+- Agency 370020000 (Allegheny) / Loan 15016876: 2026 installment is 187+ days overdue, zero DIR
+  record exists for 2026 specifically, despite 5 consecutive prior years (2021-2025) each
+  getting a task created and completed normally — a clean, provable regression, not a
+  never-worked-at-all case.
+- Running the real job (`LAS_ExceptionProcessQueue_DataImportNew`) live on DEV created **zero**
+  new exception-queue records of any type (DIR/DMU/TSP) system-wide, despite a backlog of
+  ~6,000+ eligible-but-missing installments (Prod) sitting there — because none happened to land
+  on exactly day 20 that day. Concrete, live proof of Gap 1's severity, not just static analysis.
+- A controlled test (Agency 010370000 / Loan 0000145089: no prior exception-queue record,
+  real eligibility config, not cancelled) had its calendar `DueDate` set to exactly 20 days
+  overdue; re-running the job correctly created a new DIR record (`ExceptionID 238308`,
+  `TaxYear=2026`, `InstallmentDueDate=2026-10-14`, `SLADueDate=2026-12-03`) — confirming the
+  underlying creation mechanism itself is sound; only the *exact-match* condition is the problem.
+
+---
+
+## 2. Affected Components (exact file paths)
+
+**SQL (existing procedures, to be modified — no new files for Gap 1; Gap 2 pending Question 1)**
+- `SQL/LASTax/dbo/Stored Procedures/usp_ExceptionQueue_DataImportNew.sql` — eligibility/staging driver
+- `SQL/LASTax/dbo/Stored Procedures/usp_ExceptionQueue_DataImportNewIU.sql` — insert/update + dedup guard
+
+**Not required**
+- No DAL (`ExceptionQueueDAL.cs` or any other) — confirmed no C# caller exists for either procedure.
+- No BLL (`ExceptionQueueBLL.cs` or any other) — same reasoning.
+- No Remoting dispatcher (`Host/Tax.cs`) entry — these procedures are invoked only by the SQL
+  Agent job, never through `CallMethod`/the TCP Remoting path or the classic API bridge.
+- No ASPX/code-behind/UI changes — the existing Delinquent Installment Search screen reads
+  whatever is in `tbl_ExceptionQueue`/`tbl_ExceptionQueue_UserTracking`/`tbl_ExceptionQueue_Tax_Info`
+  today; it will reflect the fix automatically once the data-producing SPs change.
+- No `BusinessEntities` XSD changes — no new columns are introduced or returned anywhere.
+
+---
+
+## 3. Database Changes
+
+**Databases involved:** `LASTax` (all `tbl_ExceptionQueue*` tables, both stored procedures),
+`LASTotalTaxSolution` (`lais_PayeeCalendar`, read-only), `LASCommon` (`tbl_Config_Master`,
+`lac_AgencyProfile`, read-only).
+
+### SP 1: `usp_ExceptionQueue_DataImportNew`
+
+| # | Change | Status |
+|---|---|---|
+| 1 | ELD tie-break direction — pick the **latest/maximum** of `ELD0`/`ELDH`/`ELDX` | ✅ **No code change needed.** Deployed `ORDER BY v.DueDate DESC` already matches the Lead's final, explicit confirmation ("select the maximum due date"). The SP's own header comment (claims "modified based on the oldest value") and the `US-129258` tSQLt test (`test_ELD_Logic_US129258`, asserts oldest/`ASC`) are both stale/incorrect relative to this confirmed answer — explicitly **out of scope** to fix here (see Dependencies / Section 15). |
+| 2 | Eligibility check: exact-match day → catch-up window | 🔲 Planned, not yet coded. Change `DATEDIFF(DAY, w.DueDate, @Getdate) = @StartDays` to a range bounded by the existing, currently-unused `@EndDays` value (already declared and populated from `tbl_Config_Master` in the SP, but never consumed in the current deployed version). |
+| 3 | New tax-year validation | ⛔ **Blocked on Question 1.** Once confirmed, add a check so only installments where the computed "current year" for that agency matches the installment's own `CurrentTaxYear` can set `@DLQResearchFlag='1'`. Best candidate formula so far (72.1% system-wide match, not yet finally accepted): `SELECT PayeeID, MAX(CurrentTaxYear) FROM lais_PayeeCalendar WHERE StatusIndicator='C' AND RunCode IN ('ELD0','ELDH','ELDX') GROUP BY PayeeID`. |
+
+### SP 2: `usp_ExceptionQueue_DataImportNewIU`
+
+| # | Change | Status |
+|---|---|---|
+| 4 | Dedup-guard (US-120627) carve-out | 🔲 Planned. The existing guard is keyed on `LoanID + AgencyID + TaxID + PropertyID + LienSEQ + SystemCode` (open rows only, `UPDLOCK`/`HOLDLOCK`, logged to `tbl_ExceptionQueue_DedupLog` with reason `ADLQ_INGEST_DUPLICATE`) and currently suppresses **any** incoming row unconditionally once a match is found. Add a condition: if the incoming ELD-derived due date genuinely differs from the existing open row's stored value, proceed to UPDATE instead of suppressing — scoped to `SystemCode='DIR'` only, so DMU/TSP behavior is untouched. |
+| 5 | Field-refresh scope on update | 🔲 Planned. **Open** items: refresh `InstallmentDueDate`, `SLADueDate`, and the Load Date (`InsertedDate`, shown as "Date Added" on screen). **Completed** items: refresh `InstallmentDueDate` (ELD) only — `SLADueDate`/Load Date left untouched (per the PO's original worked example; this is the user's own working decision, not a separately re-confirmed PO answer). |
+| 6 | Audit note | 🔲 Planned. Add a new call to `Usp_exceptionqueue_history_ins` with comment text flagging "updated due to ELD recalculation" whenever change #4/#5 actually updates an existing record. No change to `Usp_exceptionqueue_history_ins` itself. |
+
+---
+
+## 4. DAL Changes
+
+N/A — confirmed via full-codebase trace: neither `usp_ExceptionQueue_DataImportNew` nor
+`usp_ExceptionQueue_DataImportNewIU` has any C# caller anywhere in LERETANet or LeretanetCore
+(checked `ExceptionQueueDAL.cs`, `ExceptionQueueBLL.cs`, and the broader `BatchProcessing`/
+`Services` folders). Both are invoked purely by the SQL Agent job.
+
+---
+
+## 5. BLL Changes
+
+N/A — same reasoning as Section 4.
+
+---
+
+## 6. Dispatcher Changes
+
+N/A — not routed through the Remoting dispatcher (`Host/Tax.cs`/`CallMethod`) or the classic
+HTTP API bridge (`TaxServiceCore.cs`). Pure SQL-layer batch job, scheduled by SQL Server Agent.
+
+---
+
+## 7. UI Changes
+
+N/A — no ASPX page, code-behind, or control changes. The existing Delinquent Installment
+Search screen (Business Tools → Exception Processing Queue) reads directly from
+`tbl_ExceptionQueue`/`tbl_ExceptionQueue_UserTracking`/`tbl_ExceptionQueue_Tax_Info` and will
+reflect the fix automatically once the producing stored procedures change.
+
+---
+
+## 8. Validation Rules
+
+- **New rule (Gap 2, blocked on Question 1):** an installment only sets the DIR eligibility
+  flag if its own `CurrentTaxYear` matches the agency's computed "current" tax year (formula in
+  Section 3, item 3).
+- **Existing rule, reused as-is:** the US-120627 dedup-guard business key
+  (`LoanID+AgencyID+TaxID+PropertyID+LienSEQ+SystemCode`, open rows only) continues to gate
+  whether an incoming row is treated as a duplicate — item 4 only adds one additional condition
+  on top of it (did the due date change), it does not replace the key or loosen it generally.
+
+---
+
+## 9. Error Handling
+
+- The existing `TRY`/`CATCH` wrapping the cursor loop in `usp_ExceptionQueue_DataImportNew` is
+  unchanged.
+- The existing `UPDLOCK, HOLDLOCK` concurrency handling around the dedup-guard check in
+  `usp_ExceptionQueue_DataImportNewIU` is reused for the item #4 carve-out, not replaced —
+  the carve-out is an additional condition evaluated inside the same locked read, not a new
+  code path with its own locking.
+
+---
+
+## 10. Configuration Changes
+
+N/A — no new configuration keys. Item #2 (Section 3) reuses the existing
+`LASCommon.dbo.tbl_Config_Master` row (`ConfigSystemCode='EPQ', ConfigKey='EndDays'`) that the
+SP already reads into `@EndDays` today but never consumes — no insert/update to
+`tbl_Config_Master` itself is required.
+
+---
+
+## 11. SQL Script Delivery
+
+**Not yet created — implementation has not started.** This ticket is still in the analysis/
+discovery phase; items #1, #4, and #6 (Section 3) are fully specified and ready to code, items
+#2 and #5 are fully specified and ready to code, item #3 is blocked on Question 1. Once
+unblocked, scripts will follow the standard workspace convention:
+
+| File (planned) | Purpose |
+|---|---|
+| `SQL/LASTax/dbo/Stored Procedures/usp_ExceptionQueue_DataImportNew.sql` | Repo copy, `CREATE PROCEDURE`, items #2 and #3 |
+| `SQL/LASTax/dbo/Stored Procedures/usp_ExceptionQueue_DataImportNewIU.sql` | Repo copy, `CREATE PROCEDURE`, items #4, #5, #6 |
+| `Documents/LERETANet/Scripts/US-125266/XX_US125266_TEST.sql` | Test script (table/SP verification, eligible/ineligible paths, `[SIMULATE]` blocks) |
+| `SQL/Deployment-Scripts/<MMDDYYYY>/` | DBA delivery copies, `ALTER PROCEDURE` (existing SPs) |
+
+No rollback/pre-deployment snapshot script, per standard convention.
+
+---
+
+## 12. BusinessEntities / DataSet Changes
+
+N/A — no new columns are introduced or returned by either stored procedure; every column
+touched by the planned changes already exists on `tbl_ExceptionQueue`,
+`tbl_ExceptionQueue_UserTracking`, or `tbl_ExceptionQueue_Tax_Info`.
+
+---
+
+## 13. Edge Cases
+
+| Case | Handling |
+|---|---|
+| Contract-cancelled loans (`lat_ContractMasterKey.LCR_CANCEL_CODE='C'`) | Unaffected by this change — already routed through the separate `usp_ExceptionQueue_AutoCompleted_Upd` auto-complete path, not the eligibility/dedup logic being modified here. |
+| Agencies/loans with multiple liens across many tax years (e.g., Allegheny has 6 distinct `TaxID`s just for 2025, with 2 of those same `TaxID`s also appearing under 2024) | Confirmed `TaxID` alone does **not** reliably distinguish tax years for the same loan — the "already has a DIR record" check must be scoped through `tbl_ExceptionQueue_Tax_Info.TaxYear`/`InstallmentNo`, not `TaxID` alone, or old years' completed records can mask a genuinely missing current year. This is already how the discovery/report queries built during analysis are scoped; the planned SP changes must follow the same pattern. |
+| Two loans found during live DEV testing that passed every known eligibility gate (real config, not cancelled, no existing record, `Late_Rels<>'U'`) yet were **not** processed by a live job run (Agency 120310000 Installment 2/2025; Agency 330090000, Loan 0000068049) | **Unresolved.** Root cause not found during analysis — would require reading `usp_ExceptionQueue_DataImportNewIU` with debug instrumentation, or re-testing after Gap 1's fix is in place (the fix may incidentally resolve or further isolate this). Flagged as a known loose end, not confirmed to be caused by either Gap. |
+
+---
+
+## 14. Assumptions
+
+- "Current tax year" validation applies **going forward only** — no retroactive correction of
+  existing EPQ records (PO-confirmed).
+- The system should **update** an existing record rather than create a duplicate when the ELD
+  value changes (PO-confirmed).
+- New, Open, and Follow-Up states are treated identically for this story's purposes (PO-confirmed).
+- No backfill/creation of DIR records for installments already found missing by the discovery
+  report (including the ~6,000+ found on Prod) — report/visibility only (user-confirmed; reads
+  consistently with the PO's forward-only answer above, though never asked as a separately
+  worded question).
+- Catch-up window upper bound reuses the existing `@EndDays` config value (user-confirmed).
+- Completed items refresh only the ELD date on update, not SLA/Load Date (user's own working
+  decision — hedged as "I think," not independently re-confirmed with the PO).
+- Fixing `US-129258`'s backwards tSQLt test is explicitly **out of scope** for this ticket
+  (user-confirmed) — needs its own separate follow-up ticket.
+
+---
+
+## 15. Dependencies
+
+- **US-129258** (ELD logic change, deployed ~1 week before this ticket's creation): this
+  ticket's confirmed "latest wins" answer matches what US-129258 actually deployed
+  (`ORDER BY DueDate DESC`), despite that ticket's own header comment and tSQLt test claiming
+  "oldest." No code dependency — just a flagged inconsistency, explicitly left unfixed here.
+- **US-120627** (ADLQ ingest deduplication guard, deployed ~3 months before this ticket's
+  creation): this ticket extends that guard with a narrow carve-out (Section 3, item #4); it
+  does not replace, remove, or loosen the guard's existing business-key matching.
+
+---
+
+## 16. Test Scenarios
+
+| # | Scenario | Expected Result | Status |
+|---|---|---|---|
+| 1 | Installment ≥20 days overdue (not exactly 20), no existing DIR record | New DIR record created on next run | 🔲 Not blocked |
+| 2 | Installment past the `@EndDays` cutoff | Not picked up (upper bound respected) | 🔲 Not blocked |
+| 3 | ELD date changes for an installment with an **open** DIR record | Same record updates (ELD/SLA/Load Date) — no duplicate created | 🔲 Not blocked |
+| 4 | ELD date changes for an installment with a **completed** DIR record | Only ELD value updates — stays completed, not reopened, not duplicated | 🔲 Not blocked |
+| 5 | Batch runs twice in a row with no actual change in between | No duplicate, no unnecessary update | 🔲 Not blocked |
+| 6 | Audit/history entry appears after an ELD-driven update | New note referencing the recalculation | 🔲 Not blocked |
+| 7 | DMU and TSP queues, before vs. after | Identical behavior — confirmed their eligibility is unrelated to this calendar check | 🔲 Not blocked |
+| 8 | Prior-year installment does **not** create/update anything | — | ⛔ Blocked on Question 1 |
+| 9 | Current-year installment still works correctly (regression control) | — | ⛔ Blocked on Question 1 |
+
+Live-verified baseline (before any of the above changes are coded): see Section 1 — Allegheny
+reproduction and the zero-new-records job run are both already confirmed on DEV.
+
+---
+
+## 17. Deployment Sequence
+
+Per workspace convention (SQL-only change, no DAL/BLL/Dispatcher/UI involved):
+
+1. Deploy `usp_ExceptionQueue_DataImportNew.sql` and `usp_ExceptionQueue_DataImportNewIU.sql`
+   (`ALTER PROCEDURE`) to the target environment.
+2. Run the test script (Section 11) to confirm table/SP state and eligible/ineligible paths.
+3. Allow the next scheduled run of `LAS_ExceptionProcessQueue_DataImportNew`, or trigger it
+   manually (`EXEC msdb.dbo.sp_start_job @job_name = 'LAS_ExceptionProcessQueue_DataImportNew'`).
+4. Spot-check the Delinquent Installment Search screen and/or re-run the discovery report query
+   to confirm the previously-missing population has started closing.
+
+Full, exact sequencing for Gap 2 cannot be finalized until Question 1 is answered and that
+code is written.
+
+---
+
+## 18. Open Questions
+
+**Q1.** How should "current tax year" be determined for an installment?
+&nbsp;&nbsp;&nbsp;&nbsp;Context: Four candidates tested system-wide; best is `StatusIndicator='C'`
+scoped to ELD-related milestones at 72.1% match (see Section 3, item 3, for the exact formula).
+&nbsp;&nbsp;&nbsp;&nbsp;Impact: Blocks Section 3 item #3 only — items #1, #2, #4, #5, #6 are
+unblocked and ready to implement.
+&nbsp;&nbsp;&nbsp;&nbsp;Status: ⏳ Pending — sent to the Lead, no reply yet.
+
+**Resolved during analysis (no longer open):**
+- Catch-up window upper bound → reuse `@EndDays`. ✅
+- Completed-item field-refresh scope → ELD only. ✅ (user's own working call, see Section 14)
+- No backfill of already-found missing installments → confirmed. ✅
+- US-129258 backwards test fix → explicitly out of scope for this ticket. ✅ (separate follow-up needed)

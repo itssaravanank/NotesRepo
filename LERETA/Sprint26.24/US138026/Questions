@@ -1,0 +1,444 @@
+# CHM Prior Data Analysis
+
+Nov 13, 2026 · @Gopi K
+
+## How to read this document
+
+This document gives Developers, QA, Tech Leads and the Product Owner one shared picture of three things: how the existing CHM import works today, what the three new stories ask for, and a recommended answer for every open question. Everything marked Existing was verified in the code repositories (SSIS, SQL, LERETANet, LeretanetCore, SSRS, branch dev) and with read-only queries on the Dev SQL Server on 2026-11-13.
+
+| Tag | Meaning |
+| --- | --- |
+| Existing | Behaviour that is in the code and running today. Verified, not assumed. |
+| Confirmed | Decided by the story text or by the team in discussion. |
+| Proposed | The recommended design. Not yet approved; change it if the team disagrees. |
+| Open | Needs an answer before the build can start or finish. |
+
+| Story | Short name | Scope in one line |
+| --- | --- | --- |
+| US-138026 | HM Import One time - Prior Data Dump | New import job that loads the mainframe prior-data extract |
+| US-138027 | Prior Data Store and Linkage | New table for the prior data and the rules that link it to CHM items |
+| US-138028 | TDT OI UI - Linked CHM Records to Prior Data | CHM import links priors; Loan Details page shows them (story number pasted as US-13028, to confirm) |
+
+| Term | Meaning in this document |
+| --- | --- |
+| HM | Handle Manual: a tax parcel the mainframe has flagged so that a person must handle the payment instead of the automatic process |
+| CHM | Current Handle Manual: the mainframe extract of HM items for Standard Tax customers, and the LERETANet import that loads it (built June 2026 under US-119105) |
+| STAX | Standard Tax service customers (not TTS or IAC) |
+| TDT OI / COP | The TDT Open Items screens in LERETANet (Web/OutSourcing/COP) where processors work open items |
+| CHM record | A row in outs\_OpenItems created or updated by the CHM import; identified by OIR\_ID |
+| TPTI file | The attached mainframe layout "TPTI ADABAS File Offload": one record per parcel per tax year, 250 bytes |
+| Prior data | The historical per-tax-year records in the TPTI file |
+| FPA | File Processing Automation tables in db\_efidelivery that tell an import package which folder to read and track each file's status |
+
+## Part 1 - The current CHM import process (Existing)
+
+The CHM import is a SQL Agent job that runs one SSIS package every 30 minutes. The package stages a fixed-width mainframe file, and a chain of LASOutsourcing stored procedures turns each row into an open item that processors work on the TDT COP screens. In Dev the job is currently disabled and the package last ran on 2026-06-12.
+
+### 1.1 Components and how they connect
+
+&#91;embedded content: CHM import · components and what calls what\]
+
+Read top to bottom: the job runs the package, the package fills staging and calls the summary and batch SPs once per lender, and the batch SP calls the per-record SP for every row, which inserts or updates the open item. The highlighted box is the outcome the COP screens and the HM report read from.
+
+| Component | Where | Role |
+| --- | --- | --- |
+| Mainframe extract file | Dropped in the FPA-configured folder (Dev: \\scasql30d\\ftproot\\inbound\\CHM) | One record per open item, 1300 bytes fixed width, 127 fields |
+| FPA configuration | db\_efidelivery: tbl\_fpa\_ActionType\_Dstn, tbl\_fpa\_FileServer\_Dstn, tbl\_fpa\_FpaTracking | Tells the package which folder to read for job name LAS\_Import\_Outsourcing\_CHM and tracks each file's status |
+| SQL Agent job LAS\_Import\_Outsourcing\_CHM | msdb, schedule every 30 min | Runs the package from the SSIS catalog (SSISDB\\LERETANet\\Outsourcing) with environment LASConnectionStrings |
+| SSIS package LAS\_Import\_OUTS\_CHM.dtsx | SSIS repo, Outsourcing project | Reads the file, loads staging, calls the SQL chain per lender, archives the file, emails on failure |
+| Staging table outs\_CHM\_ImportStaging\_Latest | LASOutsourcing | One row per file record; truncated before every file |
+| usp\_CHM\_ImportFileSummary\_IU | LASOutsourcing | Writes the file summary row, allocates the ImportGroupID, stamps the staging rows |
+| usp\_Manual\_ProcessImportFile | LASOutsourcing | Batch processor: count reconciliation, cursor over staging rows, post-processing |
+| usp\_OI\_CHM\_ImportProcess\_OIRecord | LASOutsourcing | Per-record business logic: decides the system code, finds an existing open item, calls insert or update |
+| usp\_OI\_CHM\_ImportFile\_NewOI\_iu / usp\_OI\_CHM\_ImportFile\_ExistingOI\_u | LASOutsourcing | Insert a new open item, or update an existing one, plus the COP user-tracking row |
+| outs\_OpenItems, outs\_OpenItems\_UserTracking | LASOutsourcing | The CHM records (OIR\_REC\_TYPE = HTC, isHMItem = 1) and their COP work-tracking rows |
+| outs\_ImportFiles\_Summary, outs\_ImportFiles\_MFSummary | LASOutsourcing | Reconciliation: file counts, mainframe counts, failure reason, completion times |
+| usp\_CHM\_LogImportError, outs\_CHM\_ImportErrors | LASOutsourcing | Structured error log built for CHM; today only called from the summary SP's error handler |
+| usp\_SendSSISErrorMails\_Outsourcing | LASCommon | Failure e-mail sent by the package's failure path |
+
+### 1.2 The file
+
+The file name follows CHMOPENITEMS.D{MMDD}T{HH}, for example CHMOPENITEMS.D0720T01. The package reads the month, day and hour from the name to set the report date, and fails the run if the name does not match. Each record is 1300 bytes with 127 fixed-width fields named OIR\_\*: lender, customer, group, loan, contract, payee, original tax ID, disbursement type, sequence, date and amount, borrower and address fields, four installments (pay code, amount, delinquent date, bill number), tax year, handle-manual indicator, type code, agency ID, LERETA tax ID, ELD dates, CSRV fields, searcher code and date, and the POM code at byte 1217. A sample file is kept in the SQL repo under Deployment-Scripts/07202026/SampleFiles.
+
+### 1.3 Step by step
+
+1. The SQL Agent job starts the package on its 30-minute schedule.
+2. Folder lookup: an Execute SQL Task calls db\_efidelivery.Usp\_FPA\_GetFolderPath with the job name and stores the folder in a package variable. BadFiles and archive sub-folders are derived from it.
+3. For each file in that folder, the package runs steps 4 to 10.
+4. Report date: a Script Task parses D{MMDD}T{HH} from the file name. No match means the package fails with a ParseFileDate error.
+5. Truncate the staging table outs\_CHM\_ImportStaging\_Latest.
+6. Data flow: Flat File Source (fixed width, code page 1252) to Row Count, then a Derived Column that builds OIR\_DISB\_DATE\_MMYY from the month and year fields and stamps the current ImportGroupID, then a fast load into the staging table.
+7. Distinct lenders: a query groups the staging rows by OIR\_LENDER\_ID with a count per lender.
+8. For each lender: call usp\_CHM\_ImportFileSummary\_IU (file name, lender row count, lender, report date, report type HTC, file row count). It inserts one outs\_ImportFiles\_Summary row, allocates ImportGroupID as the current maximum plus one, stamps that lender's staging rows with it, and returns it. Then call usp\_Manual\_ProcessImportFile with that ImportGroupID.
+9. Update the FPA tracking row to PROCESSING with the ImportGroupID as SpecialStatusID.
+10. Move the file to the archive folder.
+11. On any error the package's failure path runs: a Script Task collects the error messages, the FPA row is set to Failed with the message, and usp\_SendSSISErrorMails\_Outsourcing sends the failure e-mail.
+
+Inside usp\_Manual\_ProcessImportFile, for one lender batch:
+
+1. Read the summary row (row count, mainframe file date, ProcessID) and insert an outs\_ImportFiles\_MFSummary row built from the first staging row.
+2. Update the summary through Usp\_oi\_importfilesummary\_u with status servicestart.
+3. Count check: if the mainframe total differs from the written count, or the file-type count differs from the SQL count minus one trailer record, usp\_OI\_ImportFileSummary\_RecCntCheck e-mails a count-mismatch warning. Processing continues.
+4. If the mainframe reported ZERO RECORDS, mark that lender's still-open items as processed (legacy Open Items behaviour).
+5. Open a cursor over the staging rows of this ImportGroupID. For each row call usp\_OI\_CHM\_ImportProcess\_OIRecord, using COPS\_ELD\_Date as the ELD when CalculatedELD is blank (fix from Bug-123089). On success set isImportComplete = 1 and store the resulting OIR\_ID on the staging row. If the call raises an error, write the message to the summary row's FailureReason and stop the batch.
+6. After the loop, stamp ProcessedDate and ProcessComplete. If every staging row completed, run the drop-manual cursor, apply import rules by report type, and send the open-item type summary e-mail.
+
+### 1.4 Business logic applied to each record (usp\_OI\_CHM\_ImportProcess\_OIRecord)
+
+- System code: Fn\_checkisescrow\_s decides escrow from the ELD date, late-release indicator and handle-manual indicator. Escrow items become ESC or AUD depending on the target ELD date; non-escrow items become DLQ.
+- COP eligibility: the record is a COP item when its type code is valid for COP in outs\_TypeCodes\_XRef, or when the lender's outs\_ReasonNTypeCode\_XRef and outs\_HMCodes\_XRef rows mark the handle-manual code with TDTCOP = 1.
+- Existing-record match: an open item already exists when outs\_OpenItems has a row with the same lender, loan, payee, disbursement sequence, disbursement month/year, disbursement type and original tax ID, with record type other than HOI.
+- Existing record: usp\_OI\_CHM\_ImportFile\_ExistingOI\_u updates it, refreshes the POM code, and always routes HTC/HMNW items through the create-or-reopen COP tracking branch (Bug-123244).
+- New record: usp\_OI\_CHM\_ImportFile\_NewOI\_iu inserts the outs\_OpenItems row from the staging row. isHMItem is 1 when OIR\_HANDLE\_MANL\_IND is not blank. Record type is HTC. It always creates a COP user-tracking row for HTC/HMNW items, applies reason-code updates and writes a LoanOverview memo.
+- Error in this SP: the error is e-mailed to the application-errors mailbox and swallowed; the staging row stays incomplete, which blocks the batch's post-processing step.
+
+### 1.5 Error handling and reconciliation today
+
+| Layer | On failure | Recorded where |
+| --- | --- | --- |
+| Package (file not parsable, SQL error, archive error) | Package fails; FPA row set to Failed; e-mail sent | tbl\_fpa\_FpaTracking, e-mail |
+| Summary SP | Transaction rolled back; error row written; error re-thrown to the package | outs\_CHM\_ImportErrors |
+| Batch SP, per row | FailureReason written to the summary row and the batch stops | outs\_ImportFiles\_Summary.FailureReason |
+| Per-record SP | E-mail to the application-errors mailbox; row left incomplete | E-mail only |
+| Count mismatch | Warning e-mail; processing continues | E-mail, outs\_ImportFiles\_Summary counts |
+
+### 1.6 What happens after the import (context only, not changed by the stories)
+
+- The COP screens (OpenItemAll, OpenItemFollowUp, OpenItemStatistic, OpenItemDataHistory) list HTC/HMNW items for lenders flagged IsCHM in outs\_OpenItems\_Assign\_Lender.
+- Processors open OpenItemLoanDetails.aspx, which calls outs\_COP\_LoanDetails\_S (15 result sets), enter current and prior tax information, and complete the item.
+- Job LAS\_Import\_Tax\_HandleManualLoad runs every 30 minutes: usp\_Manual\_LoadCHMReports snapshots completed STAX HM items into LASTax.lat\_RPT\_Manual\_CHM\_Reports, then sp\_createCHMReports creates transmittal rows and e-mails customers.
+- The SSRS report HandleManualCHMReport renders completed items for a lender, customer and reported date through usp\_Manual\_GenerateCHMReport, requested from LeretanetCore's View Letter Report screen through LeretaReportsAPI.
+
+### 1.7 State in Dev on 2026-11-13
+
+| Item | Dev value |
+| --- | --- |
+| Job LAS\_Import\_Outsourcing\_CHM | Present, disabled, schedule every 30 min from 07:00 |
+| Package executions | Two successful runs on 2026-06-09 and 2026-06-12 |
+| Staging, error and summary tables | Empty (no CHM rows) |
+| Batch-size config (outs\_OpenItems\_FileRunTime\_Configuration, FileType HM%) | No row; the SP falls back to 50,000 |
+| HTC items with isHMItem = 1 | 61,294, of which 58,004 completed; 5,511 have current tax info, 782 have prior tax info |
+| lat\_RPT\_Manual\_CHM\_Reports | Empty |
+
+### 1.8 Known quirks worth knowing
+
+- The failure e-mail's job description text still says "LAS\_Import\_OUTS\_Openitems Package", copied from the Open Items package.
+- outs\_CHM\_ImportErrors and usp\_CHM\_LogImportError exist but are effectively unused; per-record errors go out as e-mail only.
+- The staging table is truncated per file, so there is no history of what was loaded.
+- ImportGroupID is allocated from outs\_ImportFiles\_Summary, shared with the TTS Open Items import.
+- The SSIS Outsourcing README describes CHM as "Change of Home Mortgage"; the package and SP headers say Current Handle Manual, which is correct.
+
+## Part 2 - What the three stories add
+
+Together the three stories bring the mainframe's prior-year tax history for HM parcels into LERETANet once, keep it in a table of its own, attach it to the matching CHM open items, and show it on the Loan Details page. They do not change how CHM items are created or worked. Items below are Proposed unless marked Confirmed or Open.
+
+&#91;embedded content: Where the three stories plug into the CHM flow\]
+
+The left column is today's CHM flow; the right column is the one-time prior-data load. The two meet twice: the sweep after the load links waiting rows to Open items, and the CHM import links waiting rows to each item it inserts or updates. The Loan Details page then reads whatever is linked.
+
+### 2.1 How the stories fit together
+
+| Story | What it adds | What it touches | Depends on |
+| --- | --- | --- | --- |
+| US-138026 | A new SSIS package and SQL Agent job that load the TPTI file into the new prior-data table | SSIS Outsourcing project, FPA configuration, LASOutsourcing staging table and load SP | The table from US-138027; file facts (Part 3a) |
+| US-138027 | The prior-data table and the linkage rules, run at two moments: after the prior load, and inside the CHM import | LASOutsourcing table and linkage SP; the CHM import's per-record SP (shared with the live CHM job) | Linkage decisions (Part 3b) |
+| US-138028 | The linkage call inside the CHM import (overlaps US-138027) and the Prior Data display on Loan Details | outs\_COP\_LoanDetails\_S, OpenItemLoanDetails.aspx and its code-behind | Table and link column from US-138027; UI design (Part 3c) |
+
+Against the Part 1 flow, exactly two things are added: one step after the new-or-existing branch in step 1.4 (link any waiting prior rows to this CHM record), and one result set in the Loan Details read (the linked prior rows for this OIR\_ID).
+
+### 2.2 US-138026 - HM Import One time (Prior Data Dump)
+
+Confirmed requirements from the story: a new LERETANet import job; the file layout is the attached TPTI layout (AC1); import rules similar to the CHM import; logging, error handling and reconciliation; failures logged with clear messages (AC2); downstream workflows out of scope. The story also says "pipe delimited", which conflicts with the positional layout (Q2).
+
+Expected behaviour once built:
+
+1. The mainframe drops the TPTI file in the configured folder.
+2. The job is started manually (one-time load, Q11). The package finds the folder through FPA, loads every record into a staging table, then into the prior-data table.
+3. Each rejected record is written to the error log with the file name, row number, raw record and a plain message. Good records are loaded even when other rows fail (Q14).
+4. A summary row records file rows, loaded rows, skipped rows and failed rows, and a completion e-mail reports the same counts.
+5. The file is archived. The FPA tracking row shows the final status.
+6. The linkage sweep for existing Open CHM records runs as the last step (US-138027, N5).
+
+| Component | Proposed change | Status |
+| --- | --- | --- |
+| SSIS package LAS\_Import\_OUTS\_HMPriorData.dtsx (new, Outsourcing project) | Same skeleton as the CHM package: FPA folder lookup by the new job name, loop over files, truncate staging, Flat File Source with the 28 TPTI columns at their byte positions, Row Count, Derived Column (ImportGroupID, source file, row number), fast load to staging, summary SP, load SP, linkage SP, FPA status, archive, OnError e-mail | Proposed; format depends on Q2 |
+| Staging table outs\_CHM\_PriorData\_Staging (new) | One VARCHAR column per TPTI field at its layout width, plus RowNumber, ImportGroupID, SourceFile, LoadTs | Proposed |
+| Load SP usp\_CHM\_PriorData\_Load (new) | Moves staging rows to the prior-data table: trims, converts amounts (implied two decimals) and dates into typed columns, skips rows already present by natural key, logs rejects through usp\_CHM\_LogImportError, returns the counts | Proposed; depends on Q15, N6 |
+| Summary | One file-level row in outs\_ImportFiles\_Summary through a small variant of usp\_CHM\_ImportFileSummary\_IU that does not need a lender | Proposed; Q10 |
+| FPA seed script (db\_efidelivery) | New tbl\_fpa\_ActionType\_Dstn and tbl\_fpa\_FileServer\_Dstn rows for the new job name and folder, per environment | Proposed; Q4 |
+| SQL Agent job LAS\_Import\_Outsourcing\_HMPriorData (new) | Runs the catalog package with the current environment reference; no schedule | Proposed; Q11 |
+| Test script | Table checks, SP existence, load of the sample file, count reconciliation, error-log checks, re-run idempotency | Required by the SQL conventions |
+
+Build order: table and SPs first (so they can be tested in SSMS with the sample file), then the package, then the FPA row and job, then a full run in Dev.
+
+### 2.3 US-138027 - Prior Data Store and Linkage
+
+Confirmed requirements from the story: a new table for the prior records (AC1); rows are stored even when no CHM record exists yet (AC2); every attribute is kept as received, never modified or overwritten (AC3); the table is independent of the CHM structure (AC4); the model supports linking later (AC5); when a CHM record is imported and matching priors exist, they are linked (AC6); existing CHM records with Open status are checked for priors and linked (AC7); one CHM record can own many prior rows (AC8); linkage never creates duplicate prior rows (AC9); the link key is Agency ID and Tax ID; priors are linked only once for a given Agency ID and Tax ID.
+
+Proposed table outs\_CHM\_PriorData in LASOutsourcing (name to confirm, N11):
+
+| Column group | Columns | Purpose |
+| --- | --- | --- |
+| Key | PriorDataID (identity, primary key) | Row identity |
+| Raw values, exactly as received | AGENCY\_ID (9), TAX\_ID (50), TAX\_YEAR (4), BILL\_TYPE (1), PAYCODE\_1..4 (1), INSTALL\_1..4 (11), PENALTY\_1..4 (9), PENALTY\_INTEREST (9), SALES\_NUMBER (10), GOOD\_UNTIL\_DATE\_1 and \_2 (8), REDEEM\_AMT\_1 and \_2 (11), UPDATE\_USER (8), UPDATE\_TIMESTAMP (8), ADD\_USER (8), ADD\_TIMESTAMP (8), HANDLE\_MANUAL\_IND (1), FILLER (12) | Meets AC3: nothing altered |
+| Typed values for querying | Install\_1..4\_Amt and Penalty\_1..4\_Amt DECIMAL, PenaltyInterest\_Amt DECIMAL, RedeemAmt\_1 and \_2 DECIMAL, GoodUntilDate\_1 and \_2 DATE, UpdateDate and AddDate DATE, TaxIdNormalized VARCHAR(50) | Reporting and matching without re-parsing |
+| Load audit | ImportGroupID, SourceFile, RowNumber, LoadTs | Traceability back to the file |
+| Linkage | ParentOIR\_ID INT NULL (points at outs\_OpenItems.OIR\_ID), LinkedDate, LinkedBy (PRIOR\_IMPORT or CHM\_IMPORT) | The parent-child relationship (AC5 to AC8) |
+| Indexes | (AGENCY\_ID, TaxIdNormalized) including TAX\_YEAR; (ParentOIR\_ID) | Fast matching and fast reads for the UI |
+
+Proposed linkage SP usp\_CHM\_PriorData\_Link, called in two ways:
+
+- Sweep mode (after the prior load, AC7): for every Open CHM record (definition in N3) that has no linked priors, find unlinked prior rows with the same Agency ID and normalized Tax ID and set ParentOIR\_ID. One Open record per parcel is chosen when several exist (N2).
+- Single-record mode (inside the CHM import, AC6): called with the OIR\_ID just inserted or updated. Same match, same once-only rule. Already-linked rows are never moved (N4), so re-imports are idempotent (AC9).
+
+Worked examples of the expected behaviour:
+
+1. Prior load finds Agency 220530000, Tax ID 210518000 with three tax years, and an Open CHM item exists for that parcel. Result: three rows stored, all three linked to that item.
+2. Prior load finds a parcel with no CHM item. Result: rows stored with ParentOIR\_ID empty. Weeks later the CHM import brings a new item for that parcel. Result: the import links the waiting rows to the new item.
+3. The same CHM item is re-imported the next day. Result: nothing changes; the rows stay linked once.
+
+### 2.4 US-138028 - TDT OI UI: Linked CHM Records to Prior Data
+
+Confirmed requirements from the story: the CHM import identifies and links matching prior rows (same as US-138027 AC6); the Loan Details page has a Prior Data section for CHM loans (AC1); it shows the linked rows from the prior-data table (AC2, AC3), several when present (AC4), separate from the current loan data (AC5), with the fields from the approved UI design (AC6); nothing is shown when nothing is linked (AC7). Per discussion, "the Prior Data section" is the existing Prior Information panel on OpenItemLoanDetails.aspx.
+
+| Component | Proposed change | Status |
+| --- | --- | --- |
+| usp\_OI\_CHM\_ImportProcess\_OIRecord (shared, live) | After the new-or-existing branch, call usp\_CHM\_PriorData\_Link in single-record mode with the resulting OIR\_ID | Proposed; insertion point N12; ownership N13; shared-SP change needs Tech Lead sign-off |
+| outs\_COP\_LoanDetails\_S (shared, live) | Append result set 15: the linked prior rows for the OIR\_ID, newest tax year first. Appending keeps the 14 existing positional result sets untouched | Proposed |
+| OutSourcingBLL.GetCOPLoanDetails | No change; it already returns the whole DataSet | Existing |
+| OpenItemLoanDetails.aspx.cs BindLoanDetails | Bind Tables\[15\] into the Prior Information panel as read-only history blocks, one per tax year; leave the user-entered rows and the Save path untouched; render nothing when the table is empty | Proposed; behaviour N8, fields N7 |
+| OpenItemLoanDetails.aspx | A read-only block inside the Prior Information panel, labelled as mainframe history, with the fields from the approved design | Proposed; N7, N8, N9 |
+
+### 2.5 What does not change
+
+- The CHM file, its package and the way CHM items are created or completed.
+- The HM report job, lat\_RPT\_Manual\_CHM\_Reports and the SSRS report HandleManualCHMReport (Q13 to confirm).
+- LeretanetCore: there is no MVC version of the TDT Open Items screens, so no change there.
+- The user-entered Prior Information rows and the SPs that save them.
+
+## Part 3a - Open questions and recommendations: US-138026 (import)
+
+Eleven questions are open for the import story. Two of them block the build: the sample file (Q16) and the file format (Q2). For each question the recommendation is the default the build will follow unless the team decides otherwise.
+
+**Q2. Is the file fixed-width or pipe-delimited?** Reference: In Scope "Text File pipe delimited" versus AC1 "imported using the layout TPTI ADABAS File Offload.csv", which gives byte positions 1 to 250.
+
+- Recommendation: build for fixed-width positions exactly as the layout states; confirm with the mainframe team before the package is finalised.
+- Why: the layout has start and end positions and no delimiter column; the CHM file from the same mainframe is fixed-width; a pipe-delimited file would not need positions.
+- Confirm with: mainframe team. A sample file (Q16) settles this at once.
+- Risk: the wrong format parses zero rows on the first run. Switching the flat-file connection is cheap if known early.
+
+**Q3. What is the file name, and does it carry a date and time?** Reference: In Scope "Create a new LNET import job"; the CHM rule that reads the report date from the file name.
+
+- Recommendation: ask the mainframe team to follow the CHM convention, for example TPTIPRIOR.D{MMDD}T{HH}. If the name has no date token, use the file's modified date as the report date.
+- Why: the existing date-parsing script can be reused, and for a one-time load the report date only feeds the summary row.
+- Confirm with: mainframe team.
+- Risk: low.
+
+**Q4. Where is the file dropped, and who sets up the folder?** Reference: In Scope "import rules similar to CHM" (the FPA folder lookup).
+
+- Recommendation: a new FPA destination row for job name LAS\_Import\_Outsourcing\_HMPriorData pointing at a separate folder, for example inbound\\CHMPrior, in each environment, seeded by a deployment script in db\_efidelivery.
+- Why: the CHM package processes every file in its folder, so the TPTI file must not land in inbound\\CHM. Using the same FPA mechanism keeps the operations procedure identical.
+- Confirm with: infrastructure or DBA for the folder on the file server per environment; Tech Lead for the names.
+- Risk: a shared folder would let the CHM job pick up the TPTI file and fail.
+
+**Q9. Does the file have a header or trailer row with record counts?** Reference: In Scope "reconciliation of imported records"; the CHM count check compares mainframe counts with the SQL count.
+
+- Recommendation: assume no header or trailer. Reconcile the SSIS row count against loaded plus skipped plus rejected rows and report all four numbers. If a trailer exists, parse it and add the mainframe total to the comparison.
+- Why: the layout shows no control record; counting rows ourselves works either way.
+- Confirm with: mainframe team.
+- Risk: an unexpected trailer row would be rejected as one bad data row and logged, which is harmless.
+
+**Q10. The file has no lender, customer or loan. How is the file summary recorded?** Reference: Synopsis "all customers' datasets"; the CHM summary row is written per lender.
+
+- Recommendation: one summary row per file with a placeholder lender value (ALL), written by a small variant of the summary SP that does not loop by lender.
+- Why: usp\_CHM\_ImportFileSummary\_IU requires a lender and stamps staging rows per lender, which has no meaning for this file.
+- Confirm with: Tech Lead.
+- Risk: none.
+
+**Q11. How is a one-time job set up, and what happens to it afterwards?** Reference: story title "One time".
+
+- Recommendation: create the job enabled but without a schedule; a DBA or developer starts it once per environment after the file arrives; keep the package and job so a re-run is possible; the Product Owner decides whether to disable the job after the Production load.
+- Why: a manual start avoids an accidental second load and matches how Production deployments are run.
+- Confirm with: Product Owner and Tech Lead.
+- Risk: low.
+
+**Q13. Is any SSRS report expected?** Reference: Synopsis "most likely follow the same ... SSRS reporting structure currently used by the CHM import process"; US-138027 In Scope "accessible for reporting, auditing, and downstream processing".
+
+- Recommendation: no new or changed SSRS report in these three stories. The new table is queryable for reporting, and HandleManualCHMReport stays as it is.
+- Why: no acceptance criterion names a report. The HM report shows completed items with the tax information processors entered, not mainframe history.
+- Confirm with: Product Owner.
+- Risk: if the business expects the history on the HM report, that is a new story.
+
+**Q14. When one row fails, stop everything or log it and continue? Where are errors logged?** Reference: AC2 "Import failures are logged with clear error messages".
+
+- Recommendation: row-level failures are written to outs\_CHM\_ImportErrors through usp\_CHM\_LogImportError with file name, row number, the raw record, a category (PARSE, RULE, DUPLICATE, LINK) and a plain-language message, and the load continues. File-level failures (missing folder, unreadable file, SQL error) stop the package, set the FPA row to Failed and send the e-mail, exactly as CHM does. A completion e-mail reports loaded, skipped and failed counts.
+- Why: this is a one-time historical load, so loading most rows and reporting the rest is more useful than stopping at the first bad row. The CHM batch stops on the first row error and leaves the batch half done, which is a known weakness. The error table was built for this purpose and is unused today.
+- Confirm with: Tech Lead and Product Owner.
+- Risk: none.
+
+**Q15. How are amounts and dates encoded?** Reference: AC1 layout comments "Amount 9v2 (123456789v12)", "CCYYMMDD".
+
+- Recommendation: treat numeric fields as unsigned with two implied decimals (00000012345 means 123.45); dates as CCYYMMDD with zeros or blanks meaning no date. Keep the raw text in the raw columns; fill the typed columns with TRY\_CONVERT and log a RULE error when a value does not convert, while still storing the row.
+- Why: US-138027 AC3 requires the received values to stay untouched; typed copies make the data usable without re-parsing.
+- Confirm with: mainframe team, including whether penalties can be negative or signed.
+- Risk: low.
+
+**Q16. Can we get a sample file now?** Reference: AC1.
+
+- Recommendation: request a sample from the mainframe team immediately, even a few records. Until it arrives, build and test with a synthetic file generated from the layout, but do not sign off QA without a real file.
+- Why: Dev has no CHM data and no TPTI file; parsing the real file is the biggest technical risk in the story.
+- Confirm with: mainframe team.
+- Risk: this blocks completion of the story.
+
+**N6. If the same file is loaded twice, what should happen?** Reference: US-138027 AC3 (never overwrite) and AC9 (no duplicates), applied to an import re-run.
+
+- Recommendation: skip rows already present by natural key (Agency ID, Tax ID, Tax Year, Add Timestamp, Update Timestamp), count them as skipped and never overwrite.
+- Why: keeps AC3 true and makes a re-run after a partial failure safe.
+- Confirm with: Product Owner for the key.
+- Risk: a corrected mainframe record with the same key would be skipped, which is acceptable for a one-time dump.
+
+## Part 3b - Open questions and recommendations: US-138027 (store and linkage)
+
+Seven questions are open for the linkage story. N2 is the one business decision that changes the data model, so it should be answered first.
+
+**Q7. Is the file's Tax ID the LERETA tax ID or the customer's tax ID, and is it formatted?** Reference: In Scope link key "Agency ID, Tax ID"; AC6 and AC7.
+
+- Recommendation: match on outs\_OpenItems.OIR\_TAX\_ID (the LERETA tax ID), comparing a normalized form on both sides (upper case, dashes and spaces removed), while storing the raw value untouched.
+- Why: the TPTI record is a mainframe parcel record keyed by agency and the mainframe's own tax ID, which LERETANet holds in OIR\_TAX\_ID. The customer's ID is in OIR\_ORIG\_TAX\_ID and differs per lender. Dev rows show OIR\_TAX\_ID values with embedded spaces, so a raw equality match would miss parcels.
+- Confirm with: BA and mainframe team.
+- Risk: the wrong column means no links at all. A test of the sample file against Dev HTC rows will show the match rate before go-live.
+
+**N1. Which rows in outs\_OpenItems count as a CHM record that can own prior data?** Reference: Synopsis "link the corresponding CHM record"; AC6 and AC7.
+
+- Recommendation: rows with OIR\_REC\_TYPE = HTC and isHMItem = 1, which is what the CHM import creates when the handle-manual indicator is set.
+- Why: this is the same definition the HM report uses, and it excludes the 3.36 million HTC rows in Dev that are not handle-manual items.
+- Confirm with: Product Owner.
+- Risk: widening to all HTC rows would multiply the parent candidates and the collisions in N2.
+
+**N2. When several Open CHM items (different loans or lenders) are on the same parcel, which one gets the history?** Reference: In Scope "one-to-many relationship" and "link priors only once for a given tax ID/agency ID"; AC8.
+
+- Recommendation: keep the strict one-to-many model with one ParentOIR\_ID per prior row. In the sweep, the most recently imported Open item on the parcel claims the rows; in the CHM import, the first Open item to arrive claims them. Write an informational error-log row for the items that did not receive links.
+- Why: the story explicitly asks for one parent and a once-only link. A link table (many-to-many) would contradict that wording and make the UI read ambiguous. Collisions will happen: Dev has 61,294 HM items on 44,409 distinct parcel-year keys.
+- Confirm with: Product Owner. This is a business decision: should every loan on the parcel see the history? If yes, the model becomes a link table and "only once" has to be redefined.
+- Risk: deciding this after the table is built means schema rework.
+
+**N3. What counts as Open for AC7?** Reference: AC7 "existing CHM record status is Open".
+
+- Recommendation: isProcessed = 0 and no COP user-tracking row with isComplete = 1. That includes items shown as New, Open, Worked, Follow-up and Research, and excludes Completed, Pending QC and Completed-No QC.
+- Why: all of those sub-states are still being worked; the COP screens derive their Status column from the same flags.
+- Confirm with: Product Owner and Tech Lead.
+- Risk: low.
+
+**N4. Can a link ever be moved or added again later?** Reference: AC9; In Scope "link priors only once".
+
+- Recommendation: never moved automatically. Re-importing a linked item changes nothing. A new Open item on a parcel whose prior rows are already linked to a completed item receives nothing.
+- Why: simplest rule, fully auditable, and literally what "only once" says.
+- Confirm with: Product Owner. Processors of a later loan on the same parcel will not see the history unless N2 changes the model.
+- Risk: a business expectation gap if later loans are expected to see history.
+
+**N5. When exactly does linking run?** Reference: AC6 (on CHM import) and AC7 (existing Open records); US-138028 In Scope "Update the CHM import process".
+
+- Recommendation: both. A sweep runs as the last step of the prior-data package; a single-record call runs inside the CHM import for every new or existing Open record. Both use the same stored procedure.
+- Why: the sweep clears the backlog on day one; the per-record call handles everything that arrives afterwards; one SP means the rules cannot drift.
+- Confirm with: Tech Lead.
+- Risk: the per-record call adds one indexed lookup per CHM row, which is negligible.
+
+**N11. Are the proposed table name and shape acceptable?** Reference: AC1 "A new SQL table is created".
+
+- Recommendation: outs\_CHM\_PriorData and outs\_CHM\_PriorData\_Staging in LASOutsourcing, with raw, typed, load-audit and linkage columns and the two indexes listed in 2.3.
+- Why: follows the outs\_CHM\_\* naming of the existing CHM objects; raw columns satisfy AC3, typed columns satisfy the reporting need, the link column satisfies AC5 to AC8.
+- Confirm with: Tech Lead and DBA.
+- Risk: none.
+
+## Part 3c - Open questions and recommendations: US-138028 (UI and CHM import linkage)
+
+Six questions are open for the UI story. The approved UI design (N7) is the blocking one; N8 decides how much of the existing page changes.
+
+**N7. Which fields and layout does the approved UI design specify?** Reference: AC6 "displays all configured prior data fields according to the approved UI design".
+
+- Recommendation: attach the design to the story. Until then, the default is one read-only block per tax year inside the Prior Information panel, labelled as mainframe history, showing Tax Year, Bill Type, Pay Code, Install and Penalty for installments 1 to 4, Penalty Interest, Sales Number, Redeem Amt 1 with Good Until 1, Redeem Amt 2 with Good Until 2, Handle Manual indicator, last updated (user and date) and added (user and date).
+- Why: these are the labels processors already use in the panel, and the list covers every attribute the file carries.
+- Confirm with: Product Owner and whoever approved the design.
+- Risk: rework of the markup if the design differs from the default.
+
+**N8. Inside the existing Prior Information panel, how do the mainframe rows behave?** Reference: AC1, AC2 and AC5 of this story; US-138027 AC3 and AC4 (prior data is never modified or merged).
+
+- Recommendation: a read-only block at the top of the panel. The Save button ignores it; the user-entered rows and their save path stay as they are; both are shown when both exist; the No. of Years and Add Years controls are not touched; nothing is copied automatically. A later story could add a "copy to prior info" action if processors want it.
+- Why: US-138027 forbids modifying or merging the prior data, and keeping the editable rows and their JavaScript untouched is the smallest change to a live screen.
+- Confirm with: Product Owner.
+- Risk: if the business wants the mainframe rows pre-filled as editable rows, the save path and row identity handling must change, which is a larger and riskier change.
+
+**N9. Should the history also show on completed items and the read-only history views?** Reference: AC1 "The Loan Details page includes a Prior Data section for CHM loans".
+
+- Recommendation: yes, wherever OpenItemLoanDetails.aspx is rendered, including completed and history views, because the binding happens in one place and the block is read-only.
+- Why: consistent behaviour for the same page and no extra effort.
+- Confirm with: Product Owner.
+- Risk: none.
+
+**N10. Is the story number US-138028?** Reference: the pasted title reads "US-13028".
+
+- Recommendation: use US-138028 for folders, scripts and PR titles.
+- Confirm with: Product Owner.
+- Risk: naming only.
+
+**N12. Where in the CHM import does the linkage call go?** Reference: In Scope "Update the CHM import process to identify and link matching prior data records".
+
+- Recommendation: in usp\_OI\_CHM\_ImportProcess\_OIRecord, right after the new-or-existing branch where the OIR\_ID is known in both paths, guarded by the N1 and N3 rules and wrapped in its own error handler so a linkage failure is logged as a LINK error and never fails the CHM record.
+- Why: one place to maintain; the two large insert and update SPs (870 and 1,971 lines) stay untouched; the wrapper already holds the OIR\_ID.
+- Confirm with: Tech Lead, because this SP runs in the live CHM import and the team rules require sign-off before a shared SP changes.
+- Risk: regression in the CHM import. Mitigation: the error handler, plus the existing CHM test-data script (SQL/Test-Data/US117259\_TestData\_CHM.sql) to seed Dev items for regression testing.
+
+**N13. Which story owns the CHM-import linkage change?** Reference: US-138027 AC6 and AC7 versus US-138028 In Scope line 1, which describe the same change.
+
+- Recommendation: deliver the import-side linkage under US-138027 and the UI under US-138028.
+- Why: US-138027 defines the rules; keeping the SQL change with its rules makes the deployment package self-contained.
+- Confirm with: Product Owner or Scrum Master.
+- Risk: naming and script-folder placement only.
+
+## Part 4 - Dependencies, risks, decisions and build order
+
+Three items block the build until they are delivered: a sample TPTI file, the approved UI design, and the N2 decision on which open item owns a parcel's history. Everything else can proceed on the defaults in Part 3.
+
+| Dependency | Needed for | Owner | Status |
+| --- | --- | --- | --- |
+| Sample TPTI file (Q16) | Parsing, mapping, QA sign-off for US-138026 | Mainframe team | Open, blocking |
+| File format, name, folder and encoding answers (Q2, Q3, Q4, Q9, Q15) | Package design for US-138026 | Mainframe team, infrastructure | Open |
+| Approved UI design (N7) | Field list and layout for US-138028 | Product Owner | Open, blocking |
+| Parent-selection rule (N2) and CHM-record definition (N1) | Table design and linkage SP for US-138027 | Product Owner | Open, blocking for the table design |
+| Tech Lead sign-off on the shared SP changes (N12) | usp\_OI\_CHM\_ImportProcess\_OIRecord and outs\_COP\_LoanDetails\_S | Tech Lead | Open |
+| Folder on the file server per environment (Q4) | First run in each environment | Infrastructure or DBA | Open |
+
+| Risk | Impact | Mitigation |
+| --- | --- | --- |
+| Wrong file format assumed | First run loads nothing | Decide Q2 with the sample file before the package is finalised |
+| Tax ID does not match between file and open items (Q7) | No links created | Dry-run the sample against Dev HTC rows and report the match rate before go-live |
+| Several open items on one parcel (N2) | History attached to the wrong loan, or missing for other loans | Product Owner decision before the table is built |
+| Shared SP regression in the live CHM import (N12) | CHM items fail to import | Linkage wrapped in its own error handler; regression test with the US-117259 CHM test-data script |
+| Positional result sets in outs\_COP\_LoanDetails\_S | Other pages break if a result set is inserted in the middle | Append only, as result set 15 |
+| Dev has no CHM import data | Linkage and UI cannot be tested on real rows | Seed Dev with the CHM test-data script plus a synthetic TPTI file; final test with the real sample |
+| TPTI file dropped in the CHM folder | CHM job fails on an unknown layout | Separate folder and FPA row (Q4) |
+
+Assumptions applied unless the team says otherwise:
+
+- New SSIS work lives in the Outsourcing project, uses the project-level LASOutsourcing connection manager, follows the CHM package's OnError and archive pattern, and is deployed to the SSISDB LERETANet/Outsourcing folder with the current environment reference looked up at deployment time.
+- All SQL objects go in LASOutsourcing; deployment scripts in SQL/Deployment-Scripts/\<MMDDYYYY>/; test scripts under Documents/LERETANet/Scripts/\<TicketID>/.
+- No SSRS, LeretanetCore or LeretaReportsAPI changes.
+- The user-entered Prior Information rows and the SPs that save them are not modified.
+
+Decisions needed, by owner:
+
+- Product Owner: N1, N2, N4, N8, N9, N10, N13, Q11, Q13, and the N6 natural key.
+- Tech Lead: N3, N5, N11, N12, Q10, Q14.
+- Mainframe team: Q2, Q3, Q7, Q9, Q15, Q16.
+- Infrastructure or DBA: Q4.
+
+Proposed build order (bottom-up, so each layer is testable before the next):
+
+1. US-138027 table and staging table, plus the deployment and test scripts.
+2. US-138026 load SP and summary variant, tested in SSMS with the sample file.
+3. US-138027 linkage SP in both modes, tested against seeded Dev CHM items.
+4. US-138026 package, FPA row and job; full run in Dev; verify counts, error log, archive.
+5. US-138027 hook in usp\_OI\_CHM\_ImportProcess\_OIRecord; regression run of the CHM import in Dev.
+6. US-138028 result set in outs\_COP\_LoanDetails\_S, then the page binding and markup.
+
+Deployment sequence per environment: SQL tables, then SPs, then the FPA seed, then the SSIS project, then the job, then the LERETANet web and middle-tier build; the one-time load is started manually after the file is confirmed present.

@@ -1,0 +1,286 @@
+
+---
+
+## US-138600: open questions
+
+**Q1. What counts as the "prior tax year / installment records" of an EPQ loan?** (PO / Lead)
+- **Context:** three things could be meant:
+  - (a) the Delinquency Information grid of the task, which is what both screenshots highlight;
+  - (b) earlier monthly cycles of the same task (the DMU example, ExceptionID 131397, has 44);
+  - (c) other EPQ records of the same loan (the DIR example loan has 21 other open records).
+- **Suggested:** (a) only. It is what the processor sees on the screen and matches both examples in the story.
+- **Impact:** blocks the design; (b) and (c) would be a much larger change.
+- **Status:** ⏳ Pending
+
+**Q2. Can we send the prior records in this format? Please confirm.** (MPS / Common Services)
+- **Context:** each item in the import request is flat today and carries one tax year and one installment. Prior records cannot go as extra items, because a repeated `sourceUniqueId` in a batch is rejected.
+- **Suggested:** add an optional list, `taxLines`, to each item. All existing fields stay unchanged and keep describing the current record. The field names are the ones MPS already sends back in `taxLines` on the completion message.
+
+```json
+{
+  "correlationId": "ac866241-4f49-4f05-a7a9-1b53dbb56ffa",
+  "items": [
+    {
+      "sourceSystem": 3,
+      "sourceUniqueId": "DIR-249748-1",
+      "triggerConditionID": 19,
+      "taxYear": 2026,
+      "installment": "1",
+      "...": "all other existing fields unchanged",
+      "taxLines": [
+        {
+          "year": "2025",
+          "installment": "1",
+          "paymentCode": 0,
+          "amountDue": 0.82,
+          "penaltiesAndInterest": 0.00,
+          "billNumber": null,
+          "eldDate": "2025-01-20T00:00:00",
+          "notes": null
+        },
+        {
+          "year": "2025",
+          "installment": "2",
+          "paymentCode": 0,
+          "amountDue": 0.00,
+          "penaltiesAndInterest": 0.00,
+          "billNumber": null,
+          "eldDate": "2025-04-20T00:00:00",
+          "notes": null
+        }
+      ]
+    }
+  ]
+}
+```
+
+- **Please confirm:**
+  - the import endpoint can accept an optional `taxLines` list on each item;
+  - these names and types are acceptable: `year` (text), `installment` (text), `paymentCode` (0 = unpaid, 1 = paid), `amountDue` (decimal), `penaltiesAndInterest` (decimal), `billNumber` (text), `eldDate` (date), `notes` (text);
+  - when a loan has no prior records, whether we send an empty list (`"taxLines": []`) or leave the field out.
+- **Impact:** blocks the payload change. The sample values are examples only.
+- **Status:** ⏳ Pending
+
+**Q3. Which grid rows are sent?** (PO / Lead)
+- **Context:** the grid is not strictly "prior". Of 645 DMU items currently sent to MPS on DEV, 447 also hold the current year + installment in the grid and 140 hold a later year than the task's. 1,865 of 3,194 DMU grid rows are empty placeholders for unused installment slots.
+- **Suggested:** send every grid row that holds data, whatever its year, and skip the empty placeholders. MPS then gets the same history the processor sees.
+- **Impact:** blocks the row filter and the test scenarios for AC 1, 3 and 4.
+- **Status:** ⏳ Pending
+
+**Q4. What happens when the grid holds the same tax year + installment twice?** (PO / Lead)
+- **Context:** 49 DMU items and 1 DIR item on DEV have such duplicates. When a completion comes back with a duplicated year + installment, the whole grid update is skipped, so sending duplicates out invites that.
+- **Suggested:** send one line per year + installment, using the most recently saved row.
+- **Impact:** blocks the de-duplication rule.
+- **Status:** ⏳ Pending
+
+**Q5. How are blank or unusual grid values sent?** (PO / Lead)
+- **Context:** the payment code is blank on some data rows; amount and P&I can be empty; the ELD date can be empty or 01/01/1900.
+- **Suggested:** payment code `1` → 1, `0` → 0, anything else → not sent. Empty amounts → not sent (not 0). Empty or 01/01/1900 ELD date → not sent. Tax year and installment are sent exactly as stored (AC 4).
+- **Impact:** blocks the field mapping.
+- **Status:** ⏳ Pending
+
+**Q6. Are the other highlighted fields in scope?** (PO)
+- **Context:** the screenshots also box Redeem Amt2, Good Thru2, SLA Due Date, ELD Date and, on DMU, Payment Status, Procurement Fee, Tax Sale Indicator and Comments. The story text only mentions tax year and installment records. Redeem Amt1, Good Thru1, Base Tax Amount and Agency Info Posting Date are already sent.
+- **Suggested:** add Redeem Amt2 and Good Thru2 only, since MPS already returns those two. Leave the rest out unless requested; Payment Status is covered by US-136572.
+- **Impact:** decides how many new top-level fields join the contract change.
+- **Status:** ⏳ Pending
+
+**Q7. Should this story and US-136572 be designed as one MPS contract change?** (PO / Lead)
+- **Context:** both stories add bill number, P&I and payment code to the outbound payload and read the same grid table. If the grid goes out per installment, the answers to Q6 and Q7 of US-136572 (which P&I, which bill number) change.
+- **Suggested:** yes. Agree one contract change with MPS for both stories and build the shared parts once.
+- **Impact:** avoids two contract rounds with MPS and rework in the same code.
+- **Status:** ⏳ Pending
+
+**Q8. Is there a limit on how many lines one item may carry?** (MPS / Common Services)
+- **Context:** the largest item on DEV has 24 grid rows (13 on DIR).
+- **Suggested:** no cap on our side; MPS to confirm they have no limit.
+- **Impact:** decides whether a truncation rule is needed.
+- **Status:** ⏳ Pending
+
+**Q9. If we deploy before MPS is ready to read `taxLines`, will the import ignore the new field without rejecting the item?** (MPS / Common Services)
+- **Context:** the two systems release separately.
+- **Suggested:** MPS ignores unknown fields, so either side can deploy first.
+- **Impact:** decides whether our release has to wait for theirs.
+- **Status:** ⏳ Pending
+
+---
+
+Q1 and Q2 block implementation outright. Q2, Q8 and Q9 need the MPS / Common Services owner; the rest are for the PO and Lead.
+
+
+
+Written for: the PO, Lead and MPS / Common Services team reviewing US-138600.
+
+Here are Q3 and Q5 reworded, ready to paste in place of the earlier versions.
+
+---
+
+**Q3. Should we send the empty installment slots of the Prior Information panel, or only the installments that have data?** (PO / Lead)
+- **Context:** the panel always shows four installment boxes per tax year, and the unused ones are saved as empty rows. Example from the DMU screenshot, tax year 2022:
+
+| Slot | PC | Amount | P/I | ELD |
+|---|---|---|---|---|
+| Install1 | 1 | 3852.62 | 308.21 | 11/01/2022 |
+| Install2 | 1 | 123.38 | 1.65 | 05/01/2023 |
+| Install3 | blank | 0.00 | 0.00 | blank |
+| Install4 | blank | 0.00 | 0.00 | blank |
+
+  That loan has four tax years in the panel, so it holds 16 rows: 8 with data and 8 empty.
+- **Question:** for that loan, do we send 16 lines to MPS, or only the 8 that have data?
+- **Suggested:** send only the 8 with data. An empty slot gives MPS no information, and a line such as "2022, installment 3, amount 0.00" could be read as a real installment with nothing due. A slot counts as empty when the payment code is blank, the amount and P&I are zero or blank, and there is no bill number or ELD date.
+- **Already agreed:** all tax years shown in the panel are sent, including the task's own year and later years.
+- **Impact:** decides how many lines each item carries.
+- **Status:** ⏳ Pending
+
+**Q5. When a value is blank in the Prior Information panel, we plan to send that field as `null`. Will MPS accept `null` for these fields?** (MPS / Common Services)
+- **Context:** some installments have blank values: a blank payment code, an empty amount or P&I, no bill number, no notes, or an ELD date that is empty or 01/01/1900.
+- **Suggested:** send `null` for a blank value. We will not send `0` or an empty string, because `0` would mean "the amount is zero" while `null` means "no value on our side". Today's payload already does this, for example `"amountDue": null`.
+
+```json
+{
+  "year": "2024",
+  "installment": "1",
+  "paymentCode": 1,
+  "amountDue": null,
+  "penaltiesAndInterest": null,
+  "billNumber": null,
+  "eldDate": null,
+  "notes": null
+}
+```
+
+- **Please confirm:**
+  - MPS accepts `null` in `paymentCode`, `amountDue`, `penaltiesAndInterest`, `billNumber`, `eldDate` and `notes` without rejecting the item;
+  - `year` and `installment` are always sent with a value, exactly as stored.
+- **Impact:** decides the field mapping. If MPS cannot accept `null` for a field, we need an agreed default for it.
+- **Status:** ⏳ Pending
+
+---
+
+Written for: you, with the trimmed question at the end for the PO / Lead.
+
+**Yes, that split is right.** US-136572 sends one P&I value, for the task's own tax year and installment. The other tax years go out through US-138600 as the Prior Information lines.
+
+- **"Current" means the task's own tax year and installment, not the calendar year.** For the DMU example loan that is 2022 / 1st installment.
+- **The same P&I can appear twice for some items.** You answered in US-138600 that we send everything in the Prior Information panel, and the panel sometimes includes the task's own year (447 DMU and 6 DIR staged items in DEV). Both values come from the same row, so they always match.
+
+Given that, I would drop my second "please confirm" point, since the two stories do not conflict. The question becomes:
+
+---
+
+**Q5. Which P&I value goes in the outbound payload?**
+
+**Context:** The payload is one item per task, but P&I is stored per tax year and installment in `tbl_ExceptionQueue_Tax_YearInfo`. This story covers the task's own tax year and installment only; prior tax years are handled in US-138600.
+
+**Suggested:** Send the P&I of the task's own tax year and installment. Send `null` when that row does not exist. If more than one row matches, send the highest value, as the screen does.
+
+**Please confirm:** Is it acceptable that most DIR items will go out with P&I as `null`?
+
+---
+
+
+Written for: the PO and Lead.
+
+---
+
+**Q5. Which P&I value should we send to MPS in the outbound payload?**
+
+**Context:** Each payload item is for one tax year and installment. P&I is stored per tax year and installment in `tbl_ExceptionQueue_Tax_YearInfo`. This story covers the item's own tax year and installment only; prior tax years are handled in US-138600.
+
+**Suggested approach:** Send the P&I that belongs to the same tax year and installment as the payload item. If no P&I record exists for that tax year and installment, send `null`.
+
+**Please confirm:**
+1. Is the suggested approach correct?
+
+---
+
+
+Written for: you (the check), with the corrected question at the end for the PO / Lead.
+
+**You're right, DIR and DMU are not the same, and my suggestion in Q6 was wrong for DMU.** I checked the screen code and the stored procedures.
+
+| | DIR | DMU |
+|---|---|---|
+| Task's own "Bill No." field on the screen | Yes (`txtDelBillNo`, loaded only when the system code is DIR) | No |
+| Bill No. per installment line (Prior Information) | Yes | Yes |
+| Screen procedure returns `Tax_Info.BillNumber` | Yes | No |
+
+So for DMU a processor can only enter a Bill Number on the installment lines, which are stored in `tbl_ExceptionQueue_Tax_YearInfo`. The `Tax_Info.BillNumber` column still exists for DMU, but the screen never shows it. The MPS inbound save does write to it, which is the likely source of the few DMU values in DEV (I did not trace them).
+
+DEV data for the items currently staged to MPS:
+
+| Staged items | DIR (8,737) | DMU (645) |
+|---|---|---|
+| Task-level Bill No. filled (`Tax_Info`) | 0 | 5 |
+| Bill No. filled on the line for the item's own year and installment | 2 | 0 |
+| Bill No. filled on any line | 3 | 8 |
+
+**Revised suggestion:** use one rule for both types. Take the task-level Bill No. first; if it is empty, take the Bill No. from the line with the same tax year and installment as the payload item. That covers the DIR field and the DMU lines, and it is the same "first this, else that" pattern you already chose for Follow-up Date.
+
+Corrected question to post:
+
+---
+
+**Q6. Which Bill Number should we send to MPS, and what if it is longer than 10 characters?**
+
+**Context:** Bill Number is stored in two places:
+- The task's own "Bill No." field (`tbl_ExceptionQueue_Tax_Info`). This field is on the DIR screen only; the DMU screen does not have it.
+- The installment lines in Prior Information (`tbl_ExceptionQueue_Tax_YearInfo`), one per tax year and installment. Both DIR and DMU have these.
+
+The story says Bill Number is 10 characters, but the database allows 50. In DEV no value is longer than 10 today.
+
+**Suggested approach:**
+- For both DIR and DMU: send the task's own "Bill No." if it has a value. If it is empty, send the Bill No. from the installment line with the same tax year and installment as the payload item. If neither has a value, send `null`.
+- If a value is ever longer than 10, send the first 10 characters and log it, so the item still reaches MPS.
+
+**Please confirm:**
+1. Is this the right Bill Number to send for DIR and for DMU?
+2. Is cutting to 10 characters acceptable, or should we send the full value?
+
+---
+
+Written for: the PO and Lead.
+
+---
+
+**Q6. Which Bill Number should we send to MPS?**
+
+**Context:** Each payload item is for one tax year and installment. Bill Number is stored on the installment lines in Prior Information (`tbl_ExceptionQueue_Tax_YearInfo`), one per tax year and installment, for both DIR and DMU. The DIR screen also has a separate task-level "Bill No." field (`tbl_ExceptionQueue_Tax_Info`); the DMU screen does not have it.
+
+The story says Bill Number is 10 characters, but the database allows 50. In DEV no value is longer than 10 today.
+
+**Please confirm:**
+1. Can we send the Bill No. from the installment line with the same tax year and installment as the payload item, for both DIR and DMU?
+2. If no Bill No. exists on that line, can we send `null`?
+3. If a value is ever longer than 10 characters, can we send the first 10 characters, or should we send the full value?
+
+---
+
+One thing to know before you post it: with this rule the DIR task-level "Bill No." field is never sent. In DEV none of the 8,737 staged DIR items has a value there today, so nothing is lost right now, but the PO may want it included once processors start filling it.
+
+Yes, your understanding is correct. I confirmed it in `GetAllEPQOutboxListByIds` ([ProcurementRepository.cs:986-990](LeretaNetMPSAPI/ManualProcurementQueueAPI.Repositories/ProcurementRepository.cs#L986-L990)) and in the payload class.
+
+| Screen field | Sent to MPS today? | Outbound payload field |
+|---|---|---|
+| Redeem Amt1 | Yes | `amountDue` |
+| Good Thru1 | Yes | `goodThruDate` |
+| Base Tax Amount | Yes | `baseAmount` |
+| Agency Info Posting Date | Yes | `asofDate` |
+| Redeem Amt2 | **No** | none |
+| Good Thru2 | **No** | none |
+
+The outbound payload has no field at all for Redeem Amt2 or Good Thru2, so sending them means two new fields and MPS agreeing to the names.
+
+MPS already sends both back to us in the inbound message, as `balanceDue2` and `goodThruDate2`, and we save them to Redeem Amt2 and Good Thru2. So today these two travel one way only: MPS to us.
+
+If you want the question to say this, here is the context reworded:
+
+---
+
+**Q2. Are the other highlighted fields in scope?**
+
+**Context:** The screenshots also box Redeem Amt2 and Good Thru2. The story text only mentions tax year and installment records. Today we already send Redeem Amt1 (`amountDue`), Good Thru1 (`goodThruDate`), Base Tax Amount (`baseAmount`) and Agency Info Posting Date (`asofDate`). We do not send Redeem Amt2 and Good Thru2; MPS only sends them back to us (`balanceDue2`, `goodThruDate2`).
+
+**Please confirm:** Do we need to send Redeem Amt2 and Good Thru2 to MPS as well?
+
+---
